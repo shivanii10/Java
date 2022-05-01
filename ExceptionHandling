@@ -1,0 +1,39 @@
+1.when there is no runtime error.
+Try----> finally----> Continue program execution
+
+2.when there is runtime error.
+Try----> catch()----> finally----> Continue program execution
+
+3.When error is occurred but there is no corresponding catch block.
+Try----> finally----> Stops program execution by throwing exception object in console.
+
+4.When error is occurred and there is corresponding catch block.
+Try----> catch()----> finally----> Continue program execution
+
+-------------------------------------------------------------------------
+
+If there are n number of exception in try block, as soon as 1st one is
+encountered no matter the next once will not be executed.
+
+		int a=10,b=0;
+		try {
+			String str = "hai";
+			str.charAt(8);  // Exception:IndexOutOfRange
+			int c=a/b;      // Arithmetic Exception: divide by zero
+		}
+		
+		catch (StringIndexOutOfBoundsException e) {
+			System.out.println("Inside the string index out of bounds exception block...");
+		} 
+		
+		catch (ArithmeticException e) {
+			System.out.println("Inside the arithmetic exception block...");
+		}
+		
+		finally {
+			System.out.println("Inside the finally block ...");
+		}
+		System.out.println("After the finally block...");
+		
+OUTPUT :  Inside the string index out of bounds exception block...
+		  Inside the finally block...

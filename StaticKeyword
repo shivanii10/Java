@@ -1,0 +1,8 @@
+Static keyword:
+
+-variable : the object will share common space.
+-block : it is executed whenever .class file is created. 
+-method : static method doesn't need object for it's execution. 
+          example : public static void main()
+          It is used to mainly access methods independent of object creation.
+          

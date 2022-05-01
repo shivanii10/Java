@@ -1,0 +1,26 @@
+Lambda Expressions: 
+-anonymous methods, without return type and access specifiers.
+-datatype is not required.
+-for single statements {} not required.
+-if there is only one return statement "return" keyword is not required. 
+
+Normal Function: 
+	1.public void status()
+	{
+		System.out.println("Inside parent class");
+	}
+	
+	2.public void status(int a, int b)
+	{
+		System.out.println("Sum:"+(a+b));
+	}
+	
+	3.public void status(int a, int b)
+	{
+		return a+b;
+	}
+	
+Lambda Expression : 
+	1.()-> {System.out.println("Inside parent class");}
+	2.(a, b)-> System.out.println("Sum:"+(a+b));
+	3.(a, b)-> a+b;

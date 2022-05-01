@@ -1,0 +1,7 @@
+Relationships: 
+Is-a : using extend in another class.       
+       (InheritanceExample)
+Has-a : using object as a data member in another class. 
+	   (Employee_data and Employee)
+Uses-a : passing object as a parameter to the function in the another class.
+	   (Employee_address and Employee)

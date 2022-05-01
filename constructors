@@ -1,0 +1,82 @@
+Constructor : It is a special method having same name as class.
+			  It does't have any return type.
+			  It will automatically be created when an object is created.
+			  Types:
+			  -Default Constructor or zero parameterized Constructor.
+			  	(user or system)
+			  -Parameterized Constructor
+			   (user)
+			  -Copy Constructor
+			   (user)
+*********************************************************************************************
+
+Constructor Overloading : A class having more than 1 constructor.
+						- Student(String name){}
+			 			- Student(String name, int age){}
+			 			
+*********************************************************************************************
+If we give same name to class variable and method variable. 
+higher preference is of method variable, so it can't distinguish age = age, 
+doesn't know which one is class variable and which one is method variable, 
+because of preference method variable "age" has the value but
+while printing the values it takes value from class variable which is empty 
+that is why it is displaying null for string and 0 for integer.
+		
+Constructor(String n,int age) 
+	    {
+			name=n;
+			age=age;
+			System.out.println("Constructor ...");
+		}
+		
+To Overcome the above scenario we use "this" keyword.
+		
+Constructor(String n,int age) 
+	    {
+			name=n;
+			this.age=age; 
+			System.out.println("Constructor ...");
+		}
+now this.age represents class variable age, we will get the assigned value.
+
+
+this() method : -this() : to call one constructor from another constructor.
+				-this(); // to call default constructor.
+				-this("name"); // to call parameterized constructor.
+				
+*********************************************************************************************
+			-----Should not be recursive.
+			
+			Constructor()
+		{
+			this();
+			name="benaam";
+			age=17; //default value
+			System.out.println("Zero parameter Constructor ...");
+		}
+
+*********************************************************************************************
+		  -----should not form loop.
+		  
+		  Constructor()
+		{
+			this("kumar");
+			name="benaam";
+			age=17; //default value
+			System.out.println("Zero parameter Constructor ...");
+		}
+		
+		Constructor(String name)
+		{	this();
+			name=name;
+			age=17; //default value
+			System.out.println("One parameter Constructor ...");
+		}
+*********************************************************************************************
+		-----Should not be called in instance method, it will generate error,
+			it can only be used under constructors.
+			but vice-versa is true, instance methods can be called under constructors.
+*********************************************************************************************
+			super()
+			- to call it's immediate parent constructor.
+			

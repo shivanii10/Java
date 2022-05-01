@@ -1,0 +1,13 @@
+Streams
+-It provides methods to process the collection objects like List, Set.
+-Stream is an Interface
+-We can create stream object by stream() method.
+-It converts collection object to stream object.
+-Eg : Stream s= <collection object>.stream()
+
+
+There are two phases:
+-Configuration: Apply a filter(condition) : will only take those which will satisfy the condition.
+				map a method : will be applicable to all the elements
+-Processing: Methods like count(),sorted().. 
+			 can be applied on configured object.

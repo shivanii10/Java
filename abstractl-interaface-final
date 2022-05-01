@@ -1,0 +1,31 @@
+Abstract Classes:
+-Abstract classes are classes having at least one abstract method.
+-Objects cannot be created for Abstract classes.
+-Constructors can be created for Abstract classes.
+
+Abstract Methods:
+-Abstract methods are methods which don't have definition.
+ eg : public abstract void payment();
+
+Interface:
+-Java elements consisting all abstract methods.
+-objects and constructors can't be created.
+-variable can't be declared but can declare constants.
+-every method under interface is "public abstract" by default.
+
+Final Keyword: Accessed modifier
+can be applied on :
+-variable : to make constants eg: final int x=10;
+-method : it can't be overridden.
+-class : it cannot be inherited.
+
+
+From java 1.8 
+--------------
+
+default and static methods
+
+-we can use default methods to write definition in interface.
+eg. : public default void function_name()
+		{	
+		}

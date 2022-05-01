@@ -1,0 +1,58 @@
+COLLECTIONS
+-represents group of elements as one group.
+-It represents dynamic objects.
+-provides predefined methods to work on.
+
+Collection Framework
+-set of Interfaces, its implementation classes and algorithms
+
+1.List
+-Linear structure
+-null values allowed
+-insertion order is maintained
+-can have duplicate values
+-elements can be accessed linearly or randomly. 
+ 
+
+2.Set
+2.1.HashSet
+-Random order of elements
+-insertion order NOT is maintained
+-CANNOT have duplicate values
+-Null values can only be once 
+
+-Why can't have duplicate values?
+HashSet --> uses HashFunction
+It uses hash function for memory address allocation
+
+2.2.LinkedHashSet --> all properties same as above
+- Only insertion order is maintained
+
+2.3.TreeSet --> all properties same as above
+- Elements gets sorted
+
+3.Queue
+-Linear structure
+-null values allowed
+-insertion order is maintained
+-can have duplicate values
+-elements can be accessed linearly or randomly. 
+
+3.1.Priority Queue
+-Sorts elements
+
+3.2.Deque (Double Ended Queue)
+-Insertions and Deletions can be done at start and end.
+-Deletion can be done based on specific condition
+
+--------------------------------------------------------------------------
+
+Map
+-Two dimensional Object.
+-Stores data in form of (Key,Value) pair.
+-It is not a sub-class Of collections as it has different properties.
+-Keys cannot be duplicated but values can be duplicated.
+
+--HashMap
+--LinkedHashMap
+--TreeMap
