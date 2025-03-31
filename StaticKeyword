@@ -5,51 +5,133 @@ Static keyword:
 -method : static method doesn't need object for it's execution. 
           example : public static void main()
           It is used to mainly access methods independent of object creation.
-          
-package com.mit.util;
- 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ast.CompilationUnit;
-import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
- 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
- 
-public class MethodExtractor {
+
+
+
+import java.io.*;
+
+import java.nio.file.*;
+
+import java.util.*;
+
+import java.util.stream.*;
+
+public class ServiceFileFinder {
+
     public static void main(String[] args) {
-        // Path to your Java file
-        String javaFilePath = "C:\\Code\\lending\\ITD\\lnbase\\core\\lending-base-main\\src\\main\\java\\com\\fis\\ec\\lending\\base\\core\\main\\balance\\helper\\LNBalanceHelper.java";
-        
+
+        if (args.length < 1) {
+
+            System.out.println("Usage: java ServiceFileFinder <directoryPath>");
+
+            return;
+
+        }
+
+        String directoryPath = args[0];  // Root directory containing service files
+
+        String keywordFilePath = "C:\\Users\\e5676342\\Downloads\\test\\URLs.txt";
+
+        String outputFilePath = "Url&ServiceData.txt";
+
         try {
-            // Create a JavaParser instance
-            JavaParser parser = new JavaParser();
-            
-            // Parse the Java file
-            FileInputStream fis = new FileInputStream(new File(javaFilePath));
-            CompilationUnit cu = parser.parse(fis).getResult().orElseThrow(() -> new IOException("Parsing failed"));
-            
-            // Visit and print all methods
-            cu.accept(new MethodVisitor(), null);
+
+            List<String> keywords = readKeywords(keywordFilePath);
+
+            Map<String, Set<String>> keywordToServices = findServiceFiles(directoryPath, keywords);
+
+            saveOutput(keywordToServices, outputFilePath);
+
+            System.out.println("Results saved to " + outputFilePath);
+
         } catch (IOException e) {
-            e.printStackTrace();
+
+            System.out.println("Error: " + e.getMessage());
+
         }
+
     }
- 
-    private static class MethodVisitor extends VoidVisitorAdapter<Void> {
-        @Override
-        public void visit(MethodDeclaration md, Void arg) {
-            super.visit(md, arg);
-            System.out.println("Method: " + md.getName());
-            System.out.println("Content: " + md.getBody());
+
+    // Reads keywords from output.txt
+
+    private static List<String> readKeywords(String keywordFilePath) throws IOException {
+
+        return Files.readAllLines(Paths.get(keywordFilePath)).stream()
+
+                .filter(line -> !line.trim().isEmpty()) // Remove empty lines
+
+                .collect(Collectors.toList());
+
+    }
+
+    // Searches for keywords in .service.ts files
+
+    private static Map<String, Set<String>> findServiceFiles(String directoryPath, List<String> keywords) throws IOException {
+
+        Map<String, Set<String>> keywordToServices = new LinkedHashMap<>();
+
+        for (String keyword : keywords) {
+
+            keywordToServices.put(keyword, new HashSet<>());
+
         }
+
+        try (Stream<Path> paths = Files.walk(Paths.get(directoryPath))) {
+
+            List<Path> serviceFiles = paths
+
+                    .filter(path -> path.toString().endsWith(".service.ts"))
+
+                    .collect(Collectors.toList());
+
+            for (Path file : serviceFiles) {
+
+                List<String> lines = Files.readAllLines(file);
+
+                for (String keyword : keywords) {
+
+                    if (lines.stream().anyMatch(line -> line.contains(keyword))) {
+
+                        keywordToServices.get(keyword).add(file.getFileName().toString());
+
+                    }
+
+                }
+
+            }
+
+        }
+
+        return keywordToServices;
+
     }
+
+    // Saves results to output1.txt
+
+    private static void saveOutput(Map<String, Set<String>> keywordToServices, String outputFilePath) throws IOException {
+
+        List<String> outputLines = new ArrayList<>();
+
+        for (Map.Entry<String, Set<String>> entry : keywordToServices.entrySet()) {
+
+            outputLines.add(entry.getKey()); // Keyword on its own line
+
+            if (entry.getValue().isEmpty()) {
+
+                outputLines.add("None found");
+
+            } else {
+
+                outputLines.addAll(entry.getValue());
+
+            }
+
+            outputLines.add(""); // Add empty line for separation
+
+        }
+
+        Files.write(Paths.get(outputFilePath), outputLines);
+
+    }
+
 }
- 
-<dependency>
-    <groupId>com.github.javaparser</groupId>
-    <artifactId>javaparser-core</artifactId>
-    <version>3.26.3</version>
-</dependency>
- 
