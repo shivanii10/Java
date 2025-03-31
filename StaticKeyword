@@ -6,3 +6,50 @@ Static keyword:
           example : public static void main()
           It is used to mainly access methods independent of object creation.
           
+package com.mit.util;
+ 
+import com.github.javaparser.JavaParser;
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
+ 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+ 
+public class MethodExtractor {
+    public static void main(String[] args) {
+        // Path to your Java file
+        String javaFilePath = "C:\\Code\\lending\\ITD\\lnbase\\core\\lending-base-main\\src\\main\\java\\com\\fis\\ec\\lending\\base\\core\\main\\balance\\helper\\LNBalanceHelper.java";
+        
+        try {
+            // Create a JavaParser instance
+            JavaParser parser = new JavaParser();
+            
+            // Parse the Java file
+            FileInputStream fis = new FileInputStream(new File(javaFilePath));
+            CompilationUnit cu = parser.parse(fis).getResult().orElseThrow(() -> new IOException("Parsing failed"));
+            
+            // Visit and print all methods
+            cu.accept(new MethodVisitor(), null);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+ 
+    private static class MethodVisitor extends VoidVisitorAdapter<Void> {
+        @Override
+        public void visit(MethodDeclaration md, Void arg) {
+            super.visit(md, arg);
+            System.out.println("Method: " + md.getName());
+            System.out.println("Content: " + md.getBody());
+        }
+    }
+}
+ 
+<dependency>
+    <groupId>com.github.javaparser</groupId>
+    <artifactId>javaparser-core</artifactId>
+    <version>3.26.3</version>
+</dependency>
+ 
