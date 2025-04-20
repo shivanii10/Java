@@ -1,0 +1,1164 @@
+package com.fis.ec.lending.base.core.main.simulation.util;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.GregorianCalendar;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.TreeMap;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public class LNRpymntSchedule {
+ private static final int TWENTY_FOUR = 24;
+ private static final int ONE_THREE = 13;
+ private static final int SIXTY = 60;
+ private static final int THOUSAND = 1000;
+ private static final Logger LOG = LogManager.getLogger(LNRpymntSchedule.class);
+ private static final String CLASS_NAME = LNRpymntSchedule.class.getName();
+ private static final String COMPONENT_NAME = ComponentNames.EC_LN_RETAIL;
+ private static final String DEFAULT_CALC_BASIS = "Actual";
+
+ /**
+  * get EMI amount and MaxPayments (if MaturityDate matches with lastDueDate,calculates
+  * Amortization Schedule list and sets to the response).
+  *
+  * @param threadContext
+  * @param lnAmortCreate
+  * @return
+  * @throws BusinessException
+  * @throws TechnicalFailureException
+  */
+ public LNAmortizationCalculatorResponseDetails getRpymntDetails(
+     final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate) throws BusinessException, TechnicalFailureException {
+  LNAmortizationCalculatorResponseDetails result = null;
+  if (lnAmortCreate.getEquateInstltAmount() == null) {
+   result = calculateRpymntDetails(threadContext, lnAmortCreate);
+  } else {
+   BigDecimal tolerance = lnAmortCreate.getAmortizationToleranceAmount();
+   result = calculateRpymntDetails(threadContext, lnAmortCreate);
+   if (tolerance != null && lnAmortCreate.getLoanTermExtns() == null) {
+    AmortizationSchedule lastSchedule = null;
+    if (result != null) {
+     lastSchedule = result.getAmortizSchedule().get(result.getAmortizSchedule().size() - 1);
+    }
+
+    lnAmortCreate.setEquateInstltAmount(null);
+    LNAmortizationCalculatorResponseDetails withoutEmiResult = calculateRpymntDetails(threadContext, lnAmortCreate);
+    AmortizationSchedule withoutEmiResultLastSchedule = null;
+    if (withoutEmiResult != null) {
+     withoutEmiResultLastSchedule = withoutEmiResult.getAmortizSchedule().get(withoutEmiResult.getAmortizSchedule().size() - 1);
+    }
+    if (lastSchedule != null && withoutEmiResultLastSchedule != null
+        && withoutEmiResultLastSchedule.getTotalDueAmount().subtract(lastSchedule.getTotalDueAmount()).abs().compareTo(tolerance) > 0) {
+     final CorebankMessage message =
+         new CorebankMessage(LNMsg.SHORT_NAME, LNMsg.FINAL_PAYMENT_AMOUNT_NOT_WITHIN_THE_TOLERANCE_RANGE, MessageTypes.VALIDATION_ERROR, null);
+     throw new BusinessException(message);
+    }
+   }
+  }
+  return result;
+ }
+
+ private LNAmortizationCalculatorResponseDetails calculateRpymntDetails(
+     final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate) throws TechnicalFailureException, BusinessException {
+  LogUtility.entering(LOG, CLASS_NAME, "getRpymntDetails", threadContext, ComponentNames.EC_LN_RETAIL);
+
+  final LNAmortizationCalculatorResponseDetails lnAmortResponse = getRateBasisEMI(threadContext, lnAmortCreate);
+
+  if (lnAmortCreate.getPaymentType() == null || LNScheduleType.PRINCIPAL_AND_INTREST.value().equalsIgnoreCase(lnAmortCreate.getPaymentType())) {
+   setFirstPmtDt(threadContext, lnAmortCreate, lnAmortResponse);
+
+   final Long maxIterationAllowed = lnAmortCreate.getEquateInstltAmount() == null
+           && (lnAmortCreate.getEquateInstltAmountMap() == null || lnAmortCreate.getEquateInstltAmountMap().isEmpty())
+       ? getAmortizeMaxIteration(threadContext, LendingFECdarValue.AMORTIZE_MAX_ITERATION.getCode())
+       : 1;
+   String amortizePrecisionValue = getAmortizePrecisionLevel(threadContext, LendingFECdarValue.AMORTIZE_PRECISION_VALUE.getCode());
+   amortizePrecisionValue = amortizePrecisionValue.isEmpty() ? "0" : amortizePrecisionValue;
+
+   final LNSimulationValidatorPlugin lnSimulationValidatorPlugin =
+       PluginService.getImplementation(threadContext, LNSimulationValidatorPlugin.class, null, null, null, null);
+
+   if (lnSimulationValidatorPlugin != null) {
+    lnSimulationValidatorPlugin.validatePaymentFrequencyForFirstPaymentDate(threadContext, lnAmortCreate);
+   }
+   noOfPayment(threadContext, lnAmortCreate, lnAmortResponse, maxIterationAllowed, amortizePrecisionValue);
+  }
+  LogUtility.exiting(LOG, CLASS_NAME, "getRpymntDetails", threadContext, COMPONENT_NAME);
+  return lnAmortResponse;
+ }
+
+ private void setFirstPmtDt(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse) throws BusinessException, TechnicalFailureException {
+  if (lnAmortCreate.getPmtFreqType() != null && lnAmortCreate.getPmtFreqValue() != null && lnAmortCreate.getEffectiveDate() != null) {
+   getFirsPmtDate(threadContext, lnAmortCreate, lnAmortResponse);
+
+   lnAmortCreate.setFirstPaymentDate(lnAmortCreate.getFirstPaymentDate());
+
+   if (lnAmortCreate.getFirstPaymentDate() == null && lnAmortResponse != null && lnAmortResponse.getDteOfFrstPmt() != null) {
+    lnAmortCreate.setFirstPaymentDate(lnAmortResponse.getDteOfFrstPmt());
+   }
+  }
+ }
+
+ private void noOfPayment(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse, final Long maxIterationAllowed, String amortizePrecisionValue)
+     throws BusinessException, TechnicalFailureException {
+  int noOfPayment;
+  noOfPayment = iterate(threadContext, lnAmortCreate, lnAmortResponse, maxIterationAllowed, amortizePrecisionValue);
+  validateInstallmentAmountforPnI(threadContext, lnAmortCreate, lnAmortResponse, noOfPayment);
+  if (lnAmortResponse != null && lnAmortResponse.getTotalInterestCharge() != null && lnAmortCreate.getOddDaysInterestAmt() != null) {
+   lnAmortResponse.setTotalInterestCharge(lnAmortResponse.getTotalInterestCharge().add(lnAmortCreate.getOddDaysInterestAmt()));
+  }
+  if (lnAmortResponse != null) {
+   lnAmortResponse.setSchedNbrOfPmt(BigInteger.valueOf(noOfPayment));
+  }
+  if (lnAmortResponse != null && lnAmortResponse.getAmortizSchedule() != null
+      && LendingUtility.isNotEmptyList(lnAmortResponse.getAmortizSchedule())) {
+   lnAmortResponse.setDteOfFrstPmt(lnAmortResponse.getAmortizSchedule().get(0).getDueDate());
+  }
+ }
+
+ private void validateInstallmentAmountforPnI(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse, int noOfPayment) throws BusinessException, TechnicalFailureException {
+  final String productElementCode = getProductElementCode(threadContext, lnAmortCreate);
+  final LNRateDeterminationPlugin rateDeterminationPlugin = PluginService.getImplementation(
+      threadContext, LNRateDeterminationPlugin.class, productElementCode, lnAmortCreate.getPaymentType(), getSubType(lnAmortCreate), null);
+  setDueAndInterestAmounts(lnAmortCreate, lnAmortResponse, noOfPayment);
+  if (null != lnAmortResponse) {
+   lnAmortCreate.setLNAmortizationCalculatorResponseDetails(lnAmortResponse);
+   rateDeterminationPlugin.validateInstallmentAmount(threadContext, lnAmortCreate);
+  }
+ }
+
+ private int iterate(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse, final Long maxIterationAllowed, final String amortizePrecisionValue)
+     throws BusinessException, TechnicalFailureException {
+  BigDecimal tempExtraAmount = null;
+  int count = 1;
+  int noOfIteration = 1;
+  int noOfPayment = 0;
+  do {
+   calculateRpymntSchedule(threadContext, lnAmortCreate, lnAmortResponse);
+   noOfPayment = lnAmortResponse.getAmortizSchedule().size();
+   if (LendingUtility.isNotEmptyList(lnAmortResponse.getAmortizSchedule())) {
+    BigDecimal extraAmountInLastEMI;
+    final AmortizationSchedule lastPaidSchedule = lnAmortResponse.getAmortizSchedule().get(noOfPayment - 1);
+
+    extraAmountInLastEMI = lastPaidSchedule.getTotalDueAmount().subtract(lnAmortResponse.getEquateInstltAmt());
+    int skippedPayment = 0;
+    if (lnAmortCreate.getSkipPaymentDates() != null) {
+     for (Map.Entry<SkipPaymentType, List<CorebankDate>> skip : lnAmortCreate.getSkipPaymentDates().entrySet()) {
+      skippedPayment = skippedPayment + skip.getValue().size();
+     }
+     noOfPayment = noOfPayment - skippedPayment;
+    }
+    if (extraAmountInLastEMI.abs().compareTo(new BigDecimal(amortizePrecisionValue)) <= 0) {
+     break;
+    }
+    if (tempExtraAmount != null && extraAmountInLastEMI.abs().subtract(tempExtraAmount.abs()).compareTo(BigDecimal.ZERO) > 0) {
+     count++;
+    }
+
+    tempExtraAmount = extraAmountInLastEMI;
+    BigDecimal dividedLastEMIAmount;
+    dividedLastEMIAmount = extraAmountInLastEMI.divide(new BigDecimal(noOfPayment * count), LNConstants.TWO, RoundingMode.HALF_UP);
+    if (dividedLastEMIAmount.compareTo(BigDecimal.ZERO) == 0) {
+     break;
+    }
+    if (noOfIteration != maxIterationAllowed) {
+     lnAmortResponse.setEquateInstltAmt(lnAmortResponse.getEquateInstltAmt().add(dividedLastEMIAmount));
+    }
+   }
+   noOfIteration++;
+  } while (noOfIteration < maxIterationAllowed);
+  return noOfPayment;
+ }
+
+ /**
+  * get EMI amount and maxPayments of either contractual rate or effective rate on determination
+  * basis
+  *
+  * @param threadContext
+  * @param lnAmortCreate
+  * @return
+  * @throws TechnicalFailureException
+  * @throws BusinessException
+  */
+ private LNAmortizationCalculatorResponseDetails getRateBasisEMI(
+     final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate) throws TechnicalFailureException, BusinessException {
+  LogUtility.entering(LOG, CLASS_NAME, "getRateBasisEMI", threadContext, ComponentNames.EC_LN_RETAIL);
+
+  LNAmortizationCalculatorResponseDetails lnAmortResponse = null;
+
+  final String productElementCode = getProductElementCode(threadContext, lnAmortCreate);
+  final LNRateDeterminationPlugin rateDeterminationPlugin = PluginService.getImplementation(
+      threadContext, LNRateDeterminationPlugin.class, productElementCode, lnAmortCreate.getPaymentType(), getSubType(lnAmortCreate), null);
+  if (rateDeterminationPlugin != null) {
+   lnAmortResponse = rateDeterminationPlugin.calculateRpymntAmount(threadContext, lnAmortCreate);
+  }
+  LogUtility.exiting(LOG, CLASS_NAME, "getRateBasisEMI", threadContext, COMPONENT_NAME);
+  return lnAmortResponse;
+ }
+
+ /**
+  * @param threadContext
+  * @param lnAmortCreate
+  * @param frequencyType
+  * @param frequencyUnit
+  * @param nextDueDate
+  * @param lnAmortResponse
+  * @return
+  * @throws BusinessException
+  * @throws TechnicalFailureException
+  */
+ public void getFirsPmtDate(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse) throws BusinessException, TechnicalFailureException {
+  LogUtility.entering(LOG, CLASS_NAME, "getFirsPmtDate", threadContext, ComponentNames.EC_LN_RETAIL);
+
+  CorebankDate nextDate = null;
+  final LNFrequencyDateCalculatorHelper frequencyDateCalculateHelper = new LNFrequencyDateCalculatorHelper();
+  final FrequencyType frequencyType = FrequencyType.parseEncodedValue(lnAmortCreate.getPmtFreqType());
+
+  if (lnAmortCreate.getOddDaysIntProcessing()) {
+   final com.fis.ec.baseext.core.main.datetime.FrequencyDateCalculatorHelper calculatorHelper =
+       new com.fis.ec.baseext.core.main.datetime.FrequencyDateCalculatorHelper();
+   final DateCalculatorCommonHelper helper = new DateCalculatorCommonHelper();
+
+   nextDate = calculatorHelper.calculate(threadContext, frequencyType, lnAmortCreate.getPmtFreqValue().intValue(),
+       lnAmortCreate.getEffectiveDate().toString(), threadContext.getStandardParameters().getOrgunitId(), helper.getOrgCalendar(),
+       helper.getFinYearStartMonthFromOrg());
+
+   if (Integer.parseInt(nextDate.toString().substring(LNConstants.EIGHT, LNConstants.TEN))
+       != Integer.parseInt(lnAmortCreate.getEffectiveDate().toString().substring(LNConstants.EIGHT, LNConstants.TEN))) {
+    lnAmortCreate.setOddDaysEndDate(nextDate);
+    int oddDays = 0;
+    if (lnAmortCreate.getInterestCalculationEffctiveDate() != null) {
+     oddDays = (int) ((nextDate.getSQLDate().getTime() - lnAmortCreate.getInterestCalculationEffctiveDate().getSQLDate().getTime())
+         / (THOUSAND * SIXTY * SIXTY * TWENTY_FOUR));
+    } else {
+     oddDays = (int) ((nextDate.getSQLDate().getTime() - lnAmortCreate.getEffectiveDate().getSQLDate().getTime())
+         / (THOUSAND * SIXTY * SIXTY * TWENTY_FOUR));
+    }
+    lnAmortCreate.setOddDays(oddDays);
+    nextDate = calculatorHelper.calculate(threadContext, frequencyType, lnAmortCreate.getPmtFreqValue().intValue(), nextDate.toString(),
+        threadContext.getStandardParameters().getOrgunitId(), helper.getOrgCalendar(), helper.getFinYearStartMonthFromOrg());
+   } else {
+    nextDate = frequencyDateCalculateHelper.calculateNextPaymentDate(threadContext, FrequencyType.parseEncodedValue(lnAmortCreate.getPmtFreqType()),
+        lnAmortCreate.getPmtFreqValue().intValue(), lnAmortCreate.getEffectiveDate().toString(), null, 0);
+   }
+
+   if (lnAmortCreate.getArrangementIdentification() != null) {
+    CorebankDate calculatedDate = getCalculatedDate(threadContext, lnAmortCreate, frequencyType);
+
+    if (calculatedDate.compareTo(lnAmortCreate.getEffectiveDate()) <= 0) {
+     nextDate = frequencyDateCalculateHelper.calculateNextPaymentDate(threadContext, FrequencyType.parseEncodedValue(lnAmortCreate.getPmtFreqType()),
+         lnAmortCreate.getPmtFreqValue().intValue(), nextDate.toString(), null, 0);
+    }
+   }
+
+   lnAmortResponse.setDteOfFrstPmt(nextDate);
+  }
+  LogUtility.exiting(LOG, CLASS_NAME, "getFirsPmtDate", threadContext, COMPONENT_NAME);
+ }
+
+ /**
+  * @param threadContext
+  * @param lnAmorCreate
+  * @param emiAmount
+  * @param maxNumberOfPayments
+  * @param lnAmortResponse
+  *     <p>calculate the Principal Portion on each equated re-payment amount as follows:
+  *     <p>Where PRIN = Principal portion or Scheduled amount PMT = Re-payment amount The due dates
+  *     and the scheduled balance should also be calculated and set list to lnAmortResponse.
+  * @param skippedMonths
+  * @return
+  * @throws TechnicalFailureException
+  * @throws BusinessException
+  */
+ public LNAmortizationCalculatorResponseDetails calculateRpymntSchedule(final ThreadContext threadContext,
+     final LNAmortizationCalculatorCreate lnAmorCreate, final LNAmortizationCalculatorResponseDetails lnAmortResponse)
+     throws TechnicalFailureException, BusinessException {
+  LogUtility.entering(LOG, CLASS_NAME, "calculateRpymntSchedule", threadContext, ComponentNames.EC_LN_RETAIL);
+
+  // get request Details from lnAmorCreate
+
+  CorebankDate currentDueDate = lnAmorCreate.getEffectiveDate();
+  CorebankDate interestEffectiveDate = currentDueDate;
+  if (lnAmorCreate.getInterestCalculationEffctiveDate() != null && currentDueDate.compareTo(lnAmorCreate.getInterestCalculationEffctiveDate()) < 0) {
+   interestEffectiveDate = lnAmorCreate.getInterestCalculationEffctiveDate();
+  }
+  BigDecimal existingInterestAmt = BigDecimal.ZERO;
+  if (lnAmorCreate.getArrangementIdentification() != null) {
+   final Arrangement arrangement =
+       new LNArrangementHelper(threadContext).getArrangementInformation(threadContext, lnAmorCreate.getArrangementIdentification());
+   existingInterestAmt = getExistingInterest(threadContext, arrangement, interestEffectiveDate);
+  }
+
+  boolean existingInterestAmtAdded = false;
+
+  final BigDecimal rateOfInterest = lnAmorCreate.getInterestRate().divide(new BigDecimal(100));
+  BigDecimal oddDaysInterest;
+  if (lnAmorCreate.getOddDaysIntProcessing() && lnAmorCreate.getOddDays() > 0 && lnAmorCreate.getOddDaysEndDate() != null) {
+   currentDueDate = lnAmorCreate.getOddDaysEndDate();
+   oddDaysInterest =
+       new LNCurrencyHelper(threadContext)
+           .getCurrencyValuetWithDecimals(threadContext,
+               calculateInterest(threadContext, rateOfInterest, lnAmorCreate.getContractualAmount(),
+                   BigDecimal.valueOf(new LNRpymntContractualRatePluginImpl().getCalculationBasisValue(lnAmorCreate)), lnAmorCreate.getOddDays()),
+               lnAmorCreate.getCurrencyCode());
+   if (interestEffectiveDate.compareTo(currentDueDate) > 0) {
+    oddDaysInterest = oddDaysInterest.add(existingInterestAmt);
+    existingInterestAmtAdded = true;
+   }
+   lnAmorCreate.setOddDaysInterestAmt(oddDaysInterest);
+   interestEffectiveDate = lnAmorCreate.getOddDaysEndDate();
+  }
+  calculateSchedule(
+      threadContext, lnAmorCreate, lnAmortResponse, currentDueDate, interestEffectiveDate, existingInterestAmt, existingInterestAmtAdded);
+  LogUtility.exiting(LOG, CLASS_NAME, "calculateRpymntSchedule", threadContext, COMPONENT_NAME);
+  return lnAmortResponse;
+ }
+
+ private void calculateSchedule(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     final LNAmortizationCalculatorResponseDetails lnAmortResponse, CorebankDate currentDueDate, CorebankDate interestEffectiveDate,
+     final BigDecimal existingInterestAmt, final boolean existingInterestAmtAdded) throws TechnicalFailureException, BusinessException {
+  BigDecimal interestPaid = BigDecimal.ZERO;
+  BigDecimal totalInterestPaid = BigDecimal.ZERO;
+  BigDecimal scheduledBalanceLeft = lnAmorCreate.getContractualAmount();
+  final LNFrequencyDateCalculatorHelper frequencyDateCalculatorHelper = new LNFrequencyDateCalculatorHelper();
+  final List<AmortizationSchedule> scheduleList = new ArrayList<>();
+  BigDecimal principalPaid;
+  CorebankDate nextDueDate;
+  final long maxNumberOfPayments = lnAmortResponse.getSchedNbrOfPmt().longValue();
+  final BigDecimal rateOfInterest = lnAmorCreate.getInterestRate().divide(new BigDecimal(100));
+
+  // calculate Schedule(each dueDate,schedule Amt,interest Paid,Principal paid)
+  BigDecimal totalRpyAmt = BigDecimal.ZERO;
+  BigDecimal totalInterestCharge = BigDecimal.ZERO;
+  BigDecimal skipedInterest = BigDecimal.ZERO;
+  BigDecimal unCollectedInterest = BigDecimal.ZERO;
+
+  BigDecimal scheduledBalance = lnAmorCreate.getContractualAmount();
+  BasePeriod interestSkipPeriod = lnAmorCreate.getInterestSkipPeriod();
+  CorebankDate currentPaymentScheDate = null;
+  Arrangement arrangement = null;
+  if (lnAmorCreate.getArrangementIdentification() != null) {
+   arrangement = new LNArrangementHelper(threadContext).getArrangementInformation(threadContext, lnAmorCreate.getArrangementIdentification());
+   currentPaymentScheDate = getCurrentPaymentSchedule(threadContext, arrangement.getArrangementIdentifier());
+  }
+  // getCapitalizationDates between start date to end date Based On Capitalization
+  // if My Bill schedule Type is Prin & capitalized interest
+  List<CorebankDate> capitalizationDates = getCapitalizationDates(threadContext, arrangement, lnAmorCreate, frequencyDateCalculatorHelper);
+  for (int paymentNumber = 1; paymentNumber <= maxNumberOfPayments; paymentNumber++) {
+   // get EMI Amount & MaxPayments from lnAmortResponse
+   BigDecimal emiAmount = lnAmortResponse.getEquateInstltAmt();
+   nextDueDate = getNextDueDate(threadContext, lnAmorCreate, currentDueDate, frequencyDateCalculatorHelper, paymentNumber);
+   //      handle Capitalization
+
+   Map<String, Object> detailsMap = new HashMap<>();
+   detailsMap.put("UnCollectedInterest", unCollectedInterest);
+   detailsMap.put("ScheduledBalance", scheduledBalance);
+   detailsMap.put("CurrentDueDate", interestEffectiveDate);
+
+   handleForCapitalization(threadContext, arrangement, nextDueDate, capitalizationDates, detailsMap);
+   unCollectedInterest = (BigDecimal) detailsMap.get("UnCollectedInterest");
+   scheduledBalance = (BigDecimal) detailsMap.get("ScheduledBalance");
+   interestEffectiveDate = (CorebankDate) detailsMap.get("CurrentDueDate");
+   Map<CorebankDate, BigDecimal> emiMap = lnAmortResponse.getEquateInstltAmtMap();
+   if (!LendingUtility.isEmptyMap(emiMap)) {
+    emiAmount = emiMap.get(nextDueDate);
+   }
+   if (currentDueDate != null && nextDueDate != null) {
+    if (interestSkipPeriod == null) {
+     interestPaid = calculateInterest(threadContext, lnAmorCreate, nextDueDate, interestEffectiveDate, scheduledBalance, rateOfInterest);
+     interestPaid = calculateInterestPaid(currentDueDate, interestEffectiveDate, existingInterestAmt, existingInterestAmtAdded, interestPaid);
+    } else {
+     if (threadContext.getStandardParameters().getBookingDate().compareTo(nextDueDate) > 0) {
+      interestPaid = handleExtenstionSkipPeriodForPastSchedule(
+          threadContext, lnAmorCreate, interestEffectiveDate, nextDueDate, rateOfInterest, scheduledBalance);
+     } else if (currentPaymentScheDate.compareTo(nextDueDate) < 0) {
+      interestPaid = handleExtenstionSkipPeriodForFutureSchedule(
+          threadContext, lnAmorCreate, interestEffectiveDate, nextDueDate, rateOfInterest, scheduledBalance);
+     } else {
+      interestPaid =
+          handleExtenstionSkipPeriod(threadContext, lnAmorCreate, interestEffectiveDate, interestPaid, nextDueDate, rateOfInterest, scheduledBalance);
+     }
+    }
+    totalInterestPaid = interestPaid.add(skipedInterest).add(unCollectedInterest);
+    // for handling negative Principal
+    unCollectedInterest = getUnCollectedInterest(totalInterestPaid, emiAmount);
+    detailsMap.put("UnCollectedInterest", unCollectedInterest);
+    detailsMap.put("totalInterestPaid", totalInterestPaid);
+    detailsMap.put("interestPaid", interestPaid);
+    detailsMap.put("ScheduledBalance", scheduledBalance);
+    handleForUnpaidIntForCapitalization(capitalizationDates, detailsMap, paymentNumber, maxNumberOfPayments);
+    totalInterestPaid = (BigDecimal) detailsMap.get("totalInterestPaid");
+    interestPaid = (BigDecimal) detailsMap.get("interestPaid");
+    scheduledBalance = (BigDecimal) detailsMap.get("ScheduledBalance");
+    unCollectedInterest = (BigDecimal) detailsMap.get("UnCollectedInterest");
+    totalInterestPaid = getTotalInterestPaid(totalInterestPaid, emiAmount);
+   }
+
+   currentDueDate = nextDueDate;
+   interestEffectiveDate = nextDueDate;
+   /*
+    * for lastPayment Date, EMI will be less than scheduled balance so EMI will be
+    * interestPaid plus scheduled Balance and set scheduled Bal to Zero
+    */
+   SkipPaymentType skipPaymentType = getSkipPaymentType(lnAmorCreate.getSkipPaymentDates(), nextDueDate);
+   // INT= Interest Portion of repayment amount
+
+   if (null != skipPaymentType) {
+    emiAmount = BigDecimal.ZERO;
+    principalPaid = BigDecimal.ZERO;
+
+    boolean earnDurSkpPmtInd = getEarnDurSkpPmtInd(lnAmorCreate.getEarnDurSkpPmtInd(), lnAmorCreate.getLnSkipPaymentList(), nextDueDate);
+    if (!earnDurSkpPmtInd && skipPaymentType.toString().equals("REGISTEREDSKIPPAYMENT")) {
+     skipedInterest = BigDecimal.ZERO;
+     interestPaid = BigDecimal.ZERO;
+    } else {
+     skipedInterest = skipedInterest.add(interestPaid);
+    }
+    unCollectedInterest = BigDecimal.ZERO;
+   } else if (scheduledBalance.compareTo(emiAmount) < 0) {
+    principalPaid = scheduledBalance;
+    scheduledBalanceLeft = BigDecimal.ZERO;
+    emiAmount = principalPaid.add(totalInterestPaid);
+    skipedInterest = BigDecimal.ZERO;
+   } else {
+    principalPaid = calculatePrincipal(totalInterestPaid, maxNumberOfPayments, scheduledBalance, paymentNumber, emiAmount);
+    scheduledBalanceLeft = scheduledBalance.subtract(principalPaid);
+    skipedInterest = BigDecimal.ZERO;
+   }
+
+   if (paymentNumber == maxNumberOfPayments) {
+    emiAmount = principalPaid.add(totalInterestPaid).add(unCollectedInterest);
+   }
+
+   scheduledBalance = scheduledBalanceLeft;
+
+   AmortizationSchedule amortizationSchedule =
+       setAmortizationSchedule(currentDueDate, interestPaid, principalPaid, scheduledBalance, emiAmount, skipPaymentType, lnAmortResponse);
+
+   scheduleList.add(amortizationSchedule);
+
+   totalRpyAmt = totalRpyAmt.add(emiAmount);
+   totalInterestCharge = totalInterestCharge.add(interestPaid);
+  }
+  //    totalRpyAmt = totalInterestCharge.add(lnAmorCreate.getContractualAmount());
+  setScheduledBalances(lnAmortResponse, scheduleList, totalRpyAmt, totalInterestCharge, scheduledBalance);
+ }
+
+ private void handleForUnpaidIntForCapitalization(
+     List<CorebankDate> capitalizationDates, Map<String, Object> detailsMap, int paymentNumber, long maxNumberOfPayments) {
+  if (capitalizationDates != null) {
+   BigDecimal totalInterestPaid = (BigDecimal) detailsMap.get("totalInterestPaid");
+   BigDecimal interestPaid = (BigDecimal) detailsMap.get("interestPaid");
+   BigDecimal scheduledBalance = (BigDecimal) detailsMap.get("ScheduledBalance");
+   BigDecimal unCollectedInterest = (BigDecimal) detailsMap.get("UnCollectedInterest");
+   if (paymentNumber != maxNumberOfPayments) {
+    unCollectedInterest = totalInterestPaid;
+    interestPaid = BigDecimal.ZERO;
+    totalInterestPaid = BigDecimal.ZERO;
+   } else {
+    unCollectedInterest = BigDecimal.ZERO;
+    scheduledBalance = scheduledBalance.add(totalInterestPaid);
+    interestPaid = BigDecimal.ZERO;
+    totalInterestPaid = BigDecimal.ZERO;
+   }
+   detailsMap.put("UnCollectedInterest", unCollectedInterest);
+   detailsMap.put("totalInterestPaid", totalInterestPaid);
+   detailsMap.put("interestPaid", interestPaid);
+   detailsMap.put("ScheduledBalance", scheduledBalance);
+  }
+ }
+
+ private void handleForCapitalization(ThreadContext threadContext, Arrangement arrangement, CorebankDate nextDueDate,
+     List<CorebankDate> capitalizationDates, Map<String, Object> detailsMap) throws BusinessException, TechnicalFailureException {
+  if (null != capitalizationDates && !capitalizationDates.isEmpty()) {
+   LNEarlyPayoffQuoteCalculatorController lnEarlyPayoffQuoteCalculatorController = new LNEarlyPayoffQuoteCalculatorController(threadContext);
+   BigDecimal scheduledBalance = (BigDecimal) detailsMap.get("ScheduledBalance");
+   BigDecimal unCollectedInterest = (BigDecimal) detailsMap.get("UnCollectedInterest");
+   CorebankDate currentDueDate = (CorebankDate) detailsMap.get("CurrentDueDate");
+   List<CorebankDate> capToConsider = new ArrayList<>();
+   for (CorebankDate date : capitalizationDates) {
+    if (date.compareTo(currentDueDate) > 0 && date.compareTo(nextDueDate) <= 0) {
+     capToConsider.add(date);
+    }
+   }
+   if (!capToConsider.isEmpty()) {
+    for (CorebankDate date : capToConsider) {
+     capitalizationDates.remove(date);
+     BigDecimal projectedIntAmount =
+         lnEarlyPayoffQuoteCalculatorController.getProjectedInterest(threadContext, arrangement, scheduledBalance, currentDueDate,
+             DateTimeCalculationsController.getInstance().getDate(threadContext, date, DirectionOfCalculation.BACKWARD.getCode(), 1, 0, 0));
+     projectedIntAmount = projectedIntAmount.add(unCollectedInterest);
+     scheduledBalance = scheduledBalance.add(projectedIntAmount);
+     unCollectedInterest = BigDecimal.ZERO;
+     currentDueDate = date;
+     currentDueDate = date;
+    }
+   }
+   detailsMap.put("UnCollectedInterest", unCollectedInterest);
+   detailsMap.put("ScheduledBalance", scheduledBalance);
+   detailsMap.put("CurrentDueDate", currentDueDate);
+  }
+ }
+
+ private List<CorebankDate> getCapitalizationDates(ThreadContext threadContext, Arrangement arrangement, LNAmortizationCalculatorCreate lnAmorCreate,
+     LNFrequencyDateCalculatorHelper frequencyDateCalculatorHelper) throws BusinessException, TechnicalFailureException {
+  List<CorebankDate> capDates = null;
+  if (null != arrangement) {
+   String paymentCalcOpt = getBillCalculationOption(threadContext, arrangement, lnAmorCreate.getEffectiveDate());
+   if (null != paymentCalcOpt && paymentCalcOpt.equalsIgnoreCase("PrincipalAndCapitalizedInterest")
+       && lnAmorCreate.getCapitalizationFreqType() != null) {
+    CorebankDate nextCapitalizationDate = frequencyDateCalculatorHelper.calculateNextPaymentDate(threadContext,
+        FrequencyType.parseEncodedValue(lnAmorCreate.getCapitalizationFreqType()), lnAmorCreate.getCapitalizationFreqValue().intValue(),
+        lnAmorCreate.getCapitalizationStartDate().toString(), null, 0);
+    while (nextCapitalizationDate.compareTo(lnAmorCreate.getCapitalizationEndDate()) <= 0) {
+     if (capDates == null) {
+      capDates = new ArrayList<>();
+     }
+     capDates.add(nextCapitalizationDate);
+     // currentDueDate =nextDueDate;
+     nextCapitalizationDate = frequencyDateCalculatorHelper.calculateNextPaymentDate(threadContext,
+         FrequencyType.parseEncodedValue(lnAmorCreate.getCapitalizationFreqType()), lnAmorCreate.getCapitalizationFreqValue().intValue(),
+         nextCapitalizationDate.toString(), null, 0);
+    }
+   }
+  }
+  return capDates;
+ }
+
+ private String getBillCalculationOption(ThreadContext threadContext, final Arrangement arrangement, CorebankDate asOfDate)
+     throws TechnicalFailureException, BusinessException {
+  if (null != arrangement) {
+   final ArrangementInternalIdentification arrangementIdentification = new ArrangementInternalIdentification();
+   arrangementIdentification.setIdentifier(arrangement.getArrangementIdentifier());
+   /* Pick the Calculation option from BILL_SCHDL_LN table */
+
+   final LNArBillingScheduleRelationshipContract lnArBillingScheduleRelationship =
+       ConnectorService.getImplementation(threadContext, LNArBillingScheduleRelationshipContract.class);
+   final CorebankDate date = asOfDate == null ? threadContext.getStandardParameters().getBookingDate() : asOfDate;
+   final LNArBillingScheduleDefRltnp lnArBillingScheduleDefRltnp =
+       lnArBillingScheduleRelationship.getArrBillingSchdlRlntp(threadContext, arrangementIdentification, date);
+   if (lnArBillingScheduleDefRltnp != null && lnArBillingScheduleDefRltnp.getBillingScheduleDef() != null) {
+    return lnArBillingScheduleDefRltnp.getBillingScheduleDef().getPaymentCalculationOption();
+   } else {
+    return null;
+   }
+  }
+  return null;
+ }
+
+ private BigDecimal handleExtenstionSkipPeriodForFutureSchedule(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     CorebankDate interestEffectiveDate, CorebankDate nextDueDate, final BigDecimal rateOfInterest, BigDecimal scheduledBalance)
+     throws TechnicalFailureException, BusinessException {
+  CorebankDate fromDate = interestEffectiveDate;
+  CorebankDate toDate = nextDueDate;
+  BigDecimal interestPaid = BigDecimal.ZERO;
+  /*
+   * check if there is partial interest amount
+   */
+  List<Duration> skipDurationList = getStopAccrualPeriodList(threadContext, lnAmorCreate);
+  for (Duration skipDuration : skipDurationList) {
+   if (nextDueDate.compareTo(skipDuration.getStartDate()) > 0 && nextDueDate.compareTo(skipDuration.getEndDate()) <= 0) {
+    return interestPaid;
+   } else if (skipDuration.getEndDate().compareTo(toDate) <= 0 && skipDuration.getEndDate().compareTo(fromDate) > 0) {
+    fromDate = skipDuration.getEndDate();
+   }
+  }
+  interestPaid = calculateInterest(threadContext, lnAmorCreate, toDate, fromDate, scheduledBalance, rateOfInterest);
+  return interestPaid;
+ }
+
+ private Arrangement getArrangement(final ThreadContext threadContext, final ArrangementIdentification arrIdentification)
+     throws TechnicalFailureException, BusinessException {
+  final LNArrangementContract contract = ConnectorService.getImplementation(threadContext, LNArrangementContract.class);
+  return contract.getArrangementInformation(threadContext, arrIdentification, threadContext.getStandardParameters().getBookingDate(), null);
+ }
+
+ private List<Duration> getStopAccrualPeriodList(ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate)
+     throws TechnicalFailureException, BusinessException {
+  List<Duration> skipDurationList = new ArrayList<>();
+  BasePeriod interestSkipPeriod = lnAmorCreate.getInterestSkipPeriod();
+  Arrangement arrangement = getArrangement(threadContext, lnAmorCreate.getArrangementIdentification());
+  LNLoanTermExtensionDetailsContract extensionDetailsContract =
+      ConnectorService.getImplementation(threadContext, LNLoanTermExtensionDetailsContract.class);
+  List<LNArTermExtensionDetails> extensionDetailList = null;
+  try {
+   extensionDetailList =
+       extensionDetailsContract.getLoanTermExtensionDetails(threadContext, arrangement, threadContext.getStandardParameters().getBookingDate());
+
+   Duration duration = new Duration(interestSkipPeriod.getPeriodStartDate(), interestSkipPeriod.getPeriodEndDate());
+   skipDurationList.add(duration);
+   for (LNArTermExtensionDetails extensionDetail : extensionDetailList) {
+    if (extensionDetailList != null && !extensionDetailList.isEmpty()) {
+     Map<String, Object> additionalInfo =
+         (Map<String, Object>) extensionDetail.getAdditionalInformation().get(LNExtnAdditionalInfoConstants.SCHEDULE_ADDITIONAL_ATTRIBUTE);
+     if (additionalInfo != null && additionalInfo.containsKey(LNExtnAdditionalInfoConstants.STOP_ACCRUAL_END_DATE)) {
+      CorebankDate startDate = CorebankDate.valueOf(additionalInfo.get(LNExtnAdditionalInfoConstants.STOP_ACCRUAL_START_DATE).toString());
+      CorebankDate endDate = CorebankDate.valueOf(additionalInfo.get(LNExtnAdditionalInfoConstants.STOP_ACCRUAL_END_DATE).toString());
+      Duration dur = new Duration(startDate, endDate);
+      skipDurationList.add(dur);
+     }
+    }
+   }
+  } catch (NotAuthorizedException e) {
+   throw new TechnicalFailureException(e);
+  } catch (ConcurrentUpdateException e) {
+   throw new TechnicalFailureException(e);
+  }
+  return skipDurationList;
+ }
+
+ private BigDecimal handleExtenstionSkipPeriod(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     CorebankDate interestEffectiveDate, BigDecimal interestPaid, CorebankDate nextDueDate, final BigDecimal rateOfInterest,
+     BigDecimal scheduledBalance) throws TechnicalFailureException, BusinessException {
+  CorebankDate fromDate = interestEffectiveDate;
+  CorebankDate toDate = nextDueDate;
+  /*
+   * check if there is any partial interest amount
+   */
+  List<Duration> skipDurationList = getStopAccrualPeriodList(threadContext, lnAmorCreate);
+  for (Duration skipDuration : skipDurationList) {
+   if (skipDuration.getStartDate().compareTo(threadContext.getStandardParameters().getBookingDate()) == 0) {
+    toDate = threadContext.getStandardParameters().getBookingDate();
+   }
+   /*
+    * check if schedule is between stop Accrual period
+    */
+   if (nextDueDate.compareTo(skipDuration.getStartDate()) > 0 && nextDueDate.compareTo(skipDuration.getEndDate()) <= 0
+       && interestEffectiveDate.compareTo(skipDuration.getStartDate()) > 0 && interestEffectiveDate.compareTo(skipDuration.getEndDate()) <= 0) {
+    interestPaid = BigDecimal.ZERO;
+    return interestPaid;
+    /*
+     * check if end date is between from and to date.
+     * if it is true then enddate  is assigned to fromDate
+     */
+   } else if (skipDuration.getEndDate().compareTo(toDate) <= 0 && skipDuration.getEndDate().compareTo(fromDate) > 0) {
+    fromDate = skipDuration.getEndDate();
+    /*
+     * check if start date is between from and to date.
+     * if it is true then startdate  is assigned to toDate
+     */
+   } else if (skipDuration.getStartDate().compareTo(toDate) <= 0 && skipDuration.getStartDate().compareTo(fromDate) > 0) {
+    toDate = skipDuration.getStartDate();
+   }
+  }
+  interestPaid = calculateInterest(threadContext, lnAmorCreate, toDate, fromDate, scheduledBalance, rateOfInterest);
+  return interestPaid;
+ }
+
+ private BigDecimal handleExtenstionSkipPeriodForPastSchedule(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     CorebankDate fromDate, CorebankDate toDate, final BigDecimal rateOfInterest, BigDecimal scheduledBalance)
+     throws BusinessException, TechnicalFailureException {
+  BigDecimal interestPaid = BigDecimal.ZERO;
+  /*
+   * check if there is any partial  interest amount
+   */
+  List<Duration> skipDurationList = getStopAccrualPeriodList(threadContext, lnAmorCreate);
+  for (Duration skipDuration : skipDurationList) {
+   if (toDate.compareTo(skipDuration.getStartDate()) > 0 && toDate.compareTo(skipDuration.getEndDate()) <= 0
+       && fromDate.compareTo(skipDuration.getStartDate()) > 0 && fromDate.compareTo(skipDuration.getEndDate()) <= 0) {
+    return interestPaid;
+   } else if (skipDuration.getEndDate().compareTo(toDate) <= 0 && skipDuration.getEndDate().compareTo(fromDate) > 0) {
+    fromDate = skipDuration.getEndDate();
+   } else if (skipDuration.getStartDate().compareTo(toDate) <= 0 && skipDuration.getStartDate().compareTo(fromDate) > 0) {
+    toDate = skipDuration.getStartDate();
+   }
+  }
+
+  interestPaid = calculateInterest(threadContext, lnAmorCreate, toDate, fromDate, scheduledBalance, rateOfInterest);
+  return interestPaid;
+ }
+
+ private CorebankDate getCurrentPaymentSchedule(final ThreadContext threadContext, long arfIdfr) throws TechnicalFailureException, BusinessException {
+  CorebankDate currentDate = threadContext.getStandardParameters().getBookingDate();
+
+  final LNPaymentScheduleContract contract = ConnectorService.getImplementation(threadContext, LNPaymentScheduleContract.class);
+  // get all the payment schdeule by asOfDate
+  List<LNPaymentSchedule> lnPaymentScheduleList = new ArrayList<>();
+  try {
+   lnPaymentScheduleList = contract.getPaymentScheduleList(threadContext, arfIdfr, currentDate);
+  } catch (ConcurrentUpdateException e) {
+   throw new TechnicalFailureException(e);
+  } catch (NotAuthorizedException e) {
+   throw new TechnicalFailureException(e);
+  }
+  if (lnPaymentScheduleList != null && !lnPaymentScheduleList.isEmpty()) {
+   List<LNPaymentScheduleDetails> existingPaymentSchedule = new LNPaymentScheduleDetailsController().getPaymentScheduleDetails(
+       threadContext, arfIdfr, lnPaymentScheduleList.get(lnPaymentScheduleList.size() - 1).getScheduleIdentifier());
+   for (LNPaymentScheduleDetails lnPaymentScheduleDetails : existingPaymentSchedule) {
+    if (lnPaymentScheduleDetails.getScheduleEndDate().compareTo(currentDate) >= 0) {
+     return lnPaymentScheduleDetails.getScheduleEndDate();
+    }
+   }
+  }
+  return null;
+ }
+
+ private void setScheduledBalances(final LNAmortizationCalculatorResponseDetails lnAmortResponse, final List<AmortizationSchedule> scheduleList,
+     BigDecimal totalRpyAmt, BigDecimal totalInterestCharge, BigDecimal scheduledBalance) {
+  if (scheduledBalance.compareTo(BigDecimal.ZERO) > 0 && scheduleList != null && LendingUtility.isNotEmptyList(scheduleList)) {
+   scheduleList.get(scheduleList.size() - 1).setTotalDueAmount(scheduleList.get(scheduleList.size() - 1).getTotalDueAmount().add(scheduledBalance));
+  }
+  lnAmortResponse.setTotalInterestCharge(totalInterestCharge);
+  lnAmortResponse.setTotalRePayAmount(totalRpyAmt);
+  lnAmortResponse.setAmortizSchedule(scheduleList);
+ }
+
+ public SkipPaymentType getSkipPaymentType(Map<SkipPaymentType, List<CorebankDate>> skipPaymentDates, CorebankDate nextDueDate) {
+  SkipPaymentType result = null;
+  if (skipPaymentDates != null) {
+   for (Entry<SkipPaymentType, List<CorebankDate>> skipPaymentDate : skipPaymentDates.entrySet()) {
+    if (skipPaymentDate.getValue().contains(nextDueDate)) {
+     result = skipPaymentDate.getKey();
+    }
+   }
+  }
+  return result;
+ }
+
+ private BigDecimal calculateInterestPaid(final CorebankDate currentDueDate, final CorebankDate interestEffectiveDate,
+     final BigDecimal existingInterestAmt, boolean existingInterestAmtAdded, BigDecimal interestPaid) {
+  if (interestEffectiveDate.compareTo(currentDueDate) > 0 && !existingInterestAmtAdded) {
+   interestPaid = interestPaid.add(existingInterestAmt);
+  }
+  return interestPaid;
+ }
+
+ private BigDecimal calculatePrincipal(final BigDecimal totalInterestPaid, final long maxNumberOfPayments, final BigDecimal scheduledBalance,
+     final int paymentNumber, final BigDecimal emiAmount) {
+  BigDecimal principalPaid;
+  principalPaid = emiAmount.subtract(totalInterestPaid).compareTo(BigDecimal.ZERO) > 0 ? emiAmount.subtract(totalInterestPaid) : BigDecimal.ZERO;
+  // for last payment close all the principal amount
+  if (paymentNumber == maxNumberOfPayments) {
+   principalPaid = scheduledBalance;
+  }
+  return principalPaid;
+ }
+
+ private BigDecimal getUnCollectedInterest(final BigDecimal totalInterestPaid, final BigDecimal emiAmount) {
+  BigDecimal unCollectedInterest;
+  if (totalInterestPaid.subtract(emiAmount).compareTo(BigDecimal.ZERO) > 0) {
+   unCollectedInterest = totalInterestPaid.subtract(emiAmount);
+  } else {
+   unCollectedInterest = BigDecimal.ZERO;
+  }
+  return unCollectedInterest;
+ }
+
+ private BigDecimal getTotalInterestPaid(BigDecimal totalInterestPaid, final BigDecimal emiAmount) {
+  if (totalInterestPaid.subtract(emiAmount).compareTo(BigDecimal.ZERO) > 0) {
+   totalInterestPaid = emiAmount;
+  }
+  return totalInterestPaid;
+ }
+
+ private CorebankDate getNextDueDate(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     final CorebankDate currentDueDate, final LNFrequencyDateCalculatorHelper frequencyDateCalculatorHelper, final int paymentNumber)
+     throws TechnicalFailureException, BusinessException {
+  CorebankDate nextDueDate;
+  if (paymentNumber == 1 && lnAmorCreate.getFirstPaymentDate() != null && !lnAmorCreate.isFASBInd()) {
+   nextDueDate = lnAmorCreate.getFirstPaymentDate();
+  } else {
+   nextDueDate = frequencyDateCalculatorHelper.calculateNextPaymentDate(threadContext, FrequencyType.parseEncodedValue(lnAmorCreate.getPmtFreqType()),
+       lnAmorCreate.getPmtFreqValue().intValue(), currentDueDate.toString(), null, 0);
+  }
+  return nextDueDate;
+ }
+
+ public BigDecimal calculateInterest(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     final CorebankDate nextDueDate, final CorebankDate interestEffectiveDate, final BigDecimal scheduledBalance, final BigDecimal rateOfInterest)
+     throws TechnicalFailureException, BusinessException {
+  CorebankDate scheduleEndDate = LNDateUtil.getPreviousDay(threadContext, nextDueDate);
+
+  return calculateCommonInterest(threadContext, lnAmorCreate, interestEffectiveDate, scheduleEndDate, scheduledBalance, rateOfInterest);
+ }
+
+ /**
+  * @param threadContext
+  * @param rateOfInterest
+  * @param scheduledBalance
+  * @param daysInYear
+  * @param daysInPeriod
+  *     <p>INT=INTBAL*(I/n)*N Where INT= Interest Portion of repayment amount in a Period INTBAL =
+  *     Loan Balance for Interest Calculation: For the first Payment Term, this will be same as
+  *     contractual loan amount. For subsequent Payment Terms, this will be the Previous Term
+  *     Balance - Principal Portion of equated Re-payment Amount I = Rate of interest (annual
+  *     interest rate / 100) n= Number of days in a year as per Leap Year Basis or Non Leap Year
+  *     Basis N=Number of days in the period = [(YY2-YY1) *12 + (MM2-MM1)] *30 + (Dd2-DD1) In case
+  *     if the Day Basis is Actual, then the actual number of days in the period should be
+  *     considered instead of using this formula to arrive at number of days in the period.
+  * @return BigDecimal
+  */
+ public BigDecimal calculateInterest(final ThreadContext threadContext, final BigDecimal rateOfInterest, final BigDecimal scheduledBalance,
+     final BigDecimal daysInYear, final int daysInPeriod) {
+  LogUtility.entering(LOG, CLASS_NAME, "calculateInterest", threadContext, COMPONENT_NAME);
+  return scheduledBalance.multiply(rateOfInterest)
+      .multiply(BigDecimal.valueOf(daysInPeriod))
+      .divide(daysInYear, LNConstants.TWO, RoundingMode.HALF_UP);
+ }
+
+ /**
+  * This method is used to calculate based on ratefactor
+  *
+  * @param threadContext
+  * @param rateOfInterest
+  * @param rateFactor
+  * @param scheduledBalance
+  * @param daysInYear
+  * @param daysInPeriod
+  * @return
+  */
+ public BigDecimal calculateInterest(final ThreadContext threadContext, final BigDecimal rateOfInterest, final BigDecimal rateFactor,
+     final BigDecimal scheduledBalance, final BigDecimal daysInYear, final int daysInPeriod) {
+  LogUtility.entering(LOG, CLASS_NAME, "calculateInterest", threadContext, COMPONENT_NAME);
+  return scheduledBalance.multiply(rateOfInterest)
+      .multiply(BigDecimal.valueOf(daysInPeriod))
+      .multiply(rateFactor)
+      .divide(daysInYear, ONE_THREE, RoundingMode.HALF_UP);
+ }
+
+ /**
+  * @param emiAmount
+  * @param lnAmortizationCalculatorResponseDetails
+  * @param interestPaid
+  * @param principalPaid
+  * @param scheduledBalance
+  * @param scheduleList
+  * @param scheduledDueDate
+  * @return
+  */
+ public AmortizationSchedule setAmortizationSchedule(final CorebankDate scheduledDueDate, final BigDecimal interestPaid,
+     final BigDecimal principalPaid, final BigDecimal scheduledBalance, final BigDecimal emiAmount, final SkipPaymentType skipPaymentType,
+     final LNAmortizationCalculatorResponseDetails lnAmortizationCalculatorResponseDetails) {
+  final AmortizationSchedule amortizationSchedule = lnAmortizationCalculatorResponseDetails.new AmortizationSchedule();
+  amortizationSchedule.setTotalDueAmount(emiAmount);
+  amortizationSchedule.setDueDate(scheduledDueDate);
+  amortizationSchedule.setInterestDueAmount(interestPaid);
+  amortizationSchedule.setPrincipalDueAmount(principalPaid);
+  amortizationSchedule.setSchedBalance(scheduledBalance);
+  amortizationSchedule.setSkipPaymentType(skipPaymentType);
+
+  return amortizationSchedule;
+ }
+
+ private String getSubType(final LNAmortizationCalculatorCreate lnAmortCreate) {
+  String subType = lnAmortCreate.getPaymentCalOption();
+
+  if (LNScheduleType.PRINCIPAL_PLUS_INTREST.value().equalsIgnoreCase(lnAmortCreate.getPaymentType())) {
+   if ("ConfigurationBased".equalsIgnoreCase(lnAmortCreate.getBillingOption())) {
+    subType = "CON_" + lnAmortCreate.getPaymentCalOption();
+   } else if ("SystemCalculated".equalsIgnoreCase(lnAmortCreate.getBillingOption())) {
+    subType = "SC_" + lnAmortCreate.getPaymentCalOption();
+   } else if ("FlatAmount".equalsIgnoreCase(lnAmortCreate.getBillingOption())) {
+    subType = "FA_" + lnAmortCreate.getPaymentCalOption();
+   }
+   if (lnAmortCreate.getMultiplePaymentFrequencyDetailsList() != null && lnAmortCreate.getMultiplePaymentFrequencyDetailsList().size() > 1) {
+    subType = "SC_multipleFrequency";
+   }
+  }
+  return subType;
+ }
+
+ private String getProductElementCode(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate)
+     throws BusinessException, TechnicalFailureException {
+  String productElementCode = null;
+  if (lnAmortCreate.getArrangementIdentification() != null) {
+   final Arrangement arrangement =
+       new LNArrangementHelper(threadContext).getArrangementInformation(threadContext, lnAmortCreate.getArrangementIdentification());
+   productElementCode = arrangement.getProductElementCode();
+  }
+  if (lnAmortCreate.getProductCode() != null && lnAmortCreate.getProductCode().length() > 0) {
+   productElementCode = new LNProductHelper()
+                            .getDetails(threadContext, lnAmortCreate.getProductCode(), threadContext.getStandardParameters().getBookingDate())
+                            .getProductElementCode();
+  }
+  return productElementCode;
+ }
+
+ public int getCalculationBasisValue(final LNAmortizationCalculatorCreate lnAmortizationCalculatorCreate, final CorebankDate currentDueDate) {
+  final String leapYear =
+      null != lnAmortizationCalculatorCreate.getLeapYrBasis() ? lnAmortizationCalculatorCreate.getLeapYrBasis() : DEFAULT_CALC_BASIS;
+  final String nonLeapYr =
+      null != lnAmortizationCalculatorCreate.getNonLeapYrBasis() ? lnAmortizationCalculatorCreate.getNonLeapYrBasis() : DEFAULT_CALC_BASIS;
+  int calcBasis = 0;
+  final GregorianCalendar cal = (GregorianCalendar) Calendar.getInstance();
+  cal.setTime(currentDueDate.getSQLDate());
+  if ((cal).isLeapYear(cal.get(Calendar.YEAR))) {
+   if (leapYear.equals(DEFAULT_CALC_BASIS)) {
+    calcBasis = cal.getActualMaximum(Calendar.DAY_OF_YEAR);
+   } else {
+    calcBasis = Integer.parseInt(leapYear);
+   }
+  } else {
+   if (nonLeapYr.equals(DEFAULT_CALC_BASIS)) {
+    calcBasis = cal.getActualMaximum(Calendar.DAY_OF_YEAR);
+   } else {
+    calcBasis = Integer.parseInt(nonLeapYr);
+   }
+  }
+  return calcBasis;
+ }
+
+ /**
+  * get maximum iteration allowed for amortization calculator from group condition
+  *
+  * @param threadContext
+  * @param cdarValue
+  * @return
+  * @throws TechnicalFailureException
+  * @throws BusinessException
+  */
+ private Long getAmortizeMaxIteration(final ThreadContext threadContext, final String cdarValue) throws TechnicalFailureException, BusinessException {
+  LogUtility.entering(LOG, CLASS_NAME, "getAmortizeMaxIteration", threadContext, COMPONENT_NAME);
+
+  FinancialEntityConditionContract feConditionContract;
+  feConditionContract = ConnectorService.getImplementation(threadContext, FinancialEntityConditionContract.class);
+
+  final ConditionDetails amortizationCalculator =
+      feConditionContract.getCondition(threadContext, LendingFECdarValue.AMORTIZATION_CALCULATOR.getCode());
+  Long amortizeMaxIteration = 0l;
+  if (amortizationCalculator != null) {
+   final ConditionGroup condition = (ConditionGroup) amortizationCalculator.getCondition();
+   final NumberCondition numberCondition = (NumberCondition) condition.getMemberCondition(cdarValue).getCondition();
+   amortizeMaxIteration = numberCondition.getNumber();
+  }
+  LogUtility.exiting(LOG, CLASS_NAME, "getAmortizeMaxIteration", threadContext, COMPONENT_NAME);
+  return amortizeMaxIteration;
+ }
+
+ /**
+  * get precision level for amortization calculator from group condition
+  *
+  * @param threadContext
+  * @param cdarValue
+  * @return
+  * @throws TechnicalFailureException
+  * @throws BusinessException
+  */
+ private String getAmortizePrecisionLevel(final ThreadContext threadContext, final String cdarValue)
+     throws TechnicalFailureException, BusinessException {
+  LogUtility.entering(LOG, CLASS_NAME, "getAmortizePrecisionLevel", threadContext, COMPONENT_NAME);
+
+  FinancialEntityConditionContract feConditionContract;
+  feConditionContract = ConnectorService.getImplementation(threadContext, FinancialEntityConditionContract.class);
+
+  final ConditionDetails amortizeCondition = feConditionContract.getCondition(threadContext, LendingFECdarValue.AMORTIZATION_CALCULATOR.getCode());
+  String amortizePrecisionLevel = "";
+  if (amortizeCondition != null) {
+   final ConditionGroup condition = (ConditionGroup) amortizeCondition.getCondition();
+   final TextCondition textCondition = (TextCondition) condition.getMemberCondition(cdarValue).getCondition();
+   amortizePrecisionLevel = textCondition.getText();
+  }
+  LogUtility.exiting(LOG, CLASS_NAME, "getAmortizePrecisionLevel", threadContext, COMPONENT_NAME);
+  return amortizePrecisionLevel;
+ }
+
+ // This method first convert all the months which are has 31 days to 30 and then
+ // calculating
+ // interest based on formula.
+ private BigDecimal calculateCommonInterest(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmorCreate,
+     final CorebankDate startDate, final CorebankDate endDate, final BigDecimal scheduledBalance, final BigDecimal rateOfInterest)
+     throws TechnicalFailureException, BusinessException {
+  Map<CorebankDate, CorebankDate> monthSplit = addMonthEndSplits(startDate, endDate);
+  BigDecimal interestPaid = BigDecimal.ZERO;
+  LNRateFactorPlugin factorPlugin = PluginService.getImplementation(threadContext, LNRateFactorPlugin.class, null, null, null, null);
+
+  for (Entry<CorebankDate, CorebankDate> i : monthSplit.entrySet()) {
+   int startDate1 = Integer.parseInt(i.getKey().toString().split("-")[LNConstants.TWO]);
+   int enddate1 = Integer.parseInt(i.getValue().toString().split("-")[LNConstants.TWO]);
+   BigDecimal rateFactor = BigDecimal.ONE;
+   if (factorPlugin != null) {
+    rateFactor = factorPlugin.getDayCountFactor(threadContext, lnAmorCreate.getDayCount(), i.getKey());
+   }
+   interestPaid = interestPaid.add(calculateInterest(threadContext, rateOfInterest, rateFactor, scheduledBalance,
+       BigDecimal.valueOf(getCalculationBasisValue(lnAmorCreate, i.getKey())), enddate1 - startDate1 + 1));
+  }
+  return new LNCurrencyHelper(threadContext).getCurrencyValuetWithDecimals(threadContext, interestPaid, lnAmorCreate.getCurrencyCode());
+ }
+
+ /**
+  * Adds the month end splits.
+  *
+  * @param parameterMap the parameter map
+  * @param startDate the start date
+  * @param endDate the end date
+  */
+ public Map<CorebankDate, CorebankDate> addMonthEndSplits(final CorebankDate startDate, final CorebankDate endDate) {
+  final Map<CorebankDate, CorebankDate> map = new TreeMap<>();
+  final Calendar start = convertToCalendar(startDate);
+  final Calendar end = convertToCalendar(endDate);
+
+  while (start.before(end) || start.equals(end)) {
+   Calendar monthEnd = (Calendar) start.clone();
+   moveToMonthEnd(monthEnd);
+   final CorebankDate monthend = convertToCorebankDate(monthEnd);
+
+   final CorebankDate startdate = convertToCorebankDate(start);
+   map.put(startdate, monthend.before(endDate) ? monthend : endDate);
+   moveToNextMonthStart(start);
+  }
+  return map;
+ }
+
+ protected static void moveToMonthEnd(final Calendar cal) {
+  cal.set(Calendar.DAY_OF_MONTH, cal.getActualMaximum(Calendar.DAY_OF_MONTH));
+ }
+
+ protected static void moveToNextMonthStart(final Calendar cal) {
+  cal.add(Calendar.MONTH, 1);
+  cal.set(Calendar.DAY_OF_MONTH, cal.getActualMinimum(Calendar.DAY_OF_MONTH));
+ }
+
+ /**
+  * Convert to calendar.
+  *
+  * @param date the date
+  * @return the calendar
+  */
+ protected static Calendar convertToCalendar(final CorebankDate date) {
+  final Calendar cal = Calendar.getInstance();
+  cal.setTime(date.getSQLDate());
+  return cal;
+ }
+
+ protected static boolean isMonthEnd(final Calendar cal) {
+  final int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+  final int lastDayOfMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH);
+  return dayOfMonth == lastDayOfMonth;
+ }
+
+ /**
+  * Convert to date.
+  *
+  * @param calendar the calendar
+  * @return the date
+  */
+ protected static CorebankDate convertToCorebankDate(final Calendar calendar) {
+  return new CorebankDate(calendar.getTime().getTime());
+ }
+
+ protected AccruingChargeCalculationParameter getMonthEndParam(final ChargeCalculationParameter pram) {
+  final AccruingChargeCalculationParameter calculationParameter = new AccruingChargeCalculationParameter();
+  calculationParameter.setMonthEnd(true);
+  final ChargeBasis chargeBases = pram.getChargeBases().get(0);
+  final ChargeBasis copyChargeBases = chargeBases.copy(chargeBases);
+  final ArrayList<ChargeBasis> chargeBasisList = new ArrayList<>();
+  chargeBasisList.add(copyChargeBases);
+  calculationParameter.setChargeBases(chargeBasisList);
+  calculationParameter.setInstruction(pram.getInstruction());
+  return calculationParameter;
+ }
+
+ private BigDecimal getExistingInterest(final ThreadContext threadContext, final Arrangement arrangement, final CorebankDate interestEffectiveDate)
+     throws BusinessException, TechnicalFailureException {
+  BigDecimal existingInterest = BigDecimal.ZERO;
+  final LNArrangementBalanceHelper lnArrBalHelper = new LNArrangementBalanceHelper(threadContext);
+
+  /* Get intrestAccruedBalance */
+  final BigDecimal intrestAccruedBalance = lnArrBalHelper.getBalanceForArID(
+      arrangement.getArrangementIdentifier(), LNBalanceConstants.DEBIT_INTEREST_ACCRUED_BALANCE, interestEffectiveDate);
+
+  BigDecimal intrestArrearsBalance =
+      lnArrBalHelper.getBalanceForArID(arrangement.getArrangementIdentifier(), LNBalanceConstants.INTEREST_ARREARS_BALANCE, interestEffectiveDate);
+
+  if (null == intrestArrearsBalance) {
+   intrestArrearsBalance = BigDecimal.ZERO;
+  }
+
+  if (intrestAccruedBalance != null) {
+   existingInterest = intrestAccruedBalance.subtract(intrestArrearsBalance);
+  }
+  return existingInterest;
+ }
+
+ private void setDueAndInterestAmounts(
+     final LNAmortizationCalculatorCreate lnAmortCreate, final LNAmortizationCalculatorResponseDetails lnAmortResponse, final int noOfPayment) {
+  if (lnAmortCreate.getOddDaysIntProcessing()
+      && LNConstants.ODD_DAYS_COLLECTION_COLLECT_AT_CLOSING.equalsIgnoreCase(lnAmortCreate.getOddDaysIntCollectionMethod())
+      && lnAmortCreate.getOddDays() > 0) {
+   lnAmortResponse.getAmortizSchedule()
+       .get(lnAmortResponse.getAmortizSchedule().size() - 1)
+       .setTotalDueAmount(lnAmortResponse.getAmortizSchedule()
+                              .get(lnAmortResponse.getAmortizSchedule().size() - 1)
+                              .getTotalDueAmount()
+                              .add(lnAmortCreate.getOddDaysInterestAmt()));
+   lnAmortResponse.getAmortizSchedule()
+       .get(lnAmortResponse.getAmortizSchedule().size() - 1)
+       .setInterestDueAmount(lnAmortResponse.getAmortizSchedule()
+                                 .get(lnAmortResponse.getAmortizSchedule().size() - 1)
+                                 .getInterestDueAmount()
+                                 .add(lnAmortCreate.getOddDaysInterestAmt()));
+  } else if (lnAmortCreate.getOddDaysIntProcessing()
+      && LNConstants.ODD_DAYS_COLLECTION_ADD_TO_FIRST_BILL.equalsIgnoreCase(lnAmortCreate.getOddDaysIntCollectionMethod())
+      && lnAmortCreate.getOddDays() > 0) {
+   lnAmortResponse.getAmortizSchedule().get(0).setTotalDueAmount(
+       lnAmortResponse.getAmortizSchedule().get(0).getTotalDueAmount().add(lnAmortCreate.getOddDaysInterestAmt()));
+   lnAmortResponse.getAmortizSchedule().get(0).setInterestDueAmount(
+       lnAmortResponse.getAmortizSchedule().get(0).getInterestDueAmount().add(lnAmortCreate.getOddDaysInterestAmt()));
+  } else if (lnAmortCreate.getOddDaysIntProcessing()
+      && LNConstants.ODD_DAYS_COLLECTION_AMORTIZE_THE_INTEREST.equalsIgnoreCase(lnAmortCreate.getOddDaysIntCollectionMethod())
+      && lnAmortCreate.getOddDays() > 0) {
+   final BigDecimal oddDaySDividedAmount = lnAmortCreate.getOddDaysInterestAmt().divide(BigDecimal.valueOf(noOfPayment), 2, RoundingMode.HALF_UP);
+   for (final AmortizationSchedule amortizationSchedule : lnAmortResponse.getAmortizSchedule()) {
+    if (amortizationSchedule.getSkipPaymentType() == null) {
+     amortizationSchedule.setTotalDueAmount(amortizationSchedule.getTotalDueAmount().add(oddDaySDividedAmount));
+     amortizationSchedule.setInterestDueAmount(amortizationSchedule.getInterestDueAmount().add(oddDaySDividedAmount));
+    }
+   }
+  }
+ }
+
+ private boolean getEarnDurSkpPmtInd(
+     Map<CorebankDate, Boolean> skipPaymentDetails, List<LNArrangementSkipPaymentDetail> skipPaymentList, CorebankDate nextDueDate) {
+  boolean earnDurSkpPmtInd = true;
+  if (skipPaymentList != null && !skipPaymentList.isEmpty()) {
+   earnDurSkpPmtInd = skipPaymentList.get(0).isEarnDurSkpPmtInd();
+  } else if (skipPaymentDetails != null) {
+   for (Map.Entry<CorebankDate, Boolean> skipPaymentDetail : skipPaymentDetails.entrySet()) {
+    if (skipPaymentDetail.getKey().equals(nextDueDate) && Utility.isNotNull(skipPaymentDetail.getValue())) {
+     earnDurSkpPmtInd = skipPaymentDetail.getValue().booleanValue();
+    }
+   }
+  }
+  return earnDurSkpPmtInd;
+ }
+
+ /**
+  * @param threadContext
+  * @param lnAmortCreate
+  * @param nextDate
+  * @param frequencyType
+  * @throws TechnicalFailureException
+  * @throws BusinessException
+  */
+ private CorebankDate getCalculatedDate(final ThreadContext threadContext, final LNAmortizationCalculatorCreate lnAmortCreate,
+     final FrequencyType frequencyType) throws TechnicalFailureException, BusinessException {
+  final DateCalculatorCommonHelper helper = new DateCalculatorCommonHelper();
+  final FrequencyDateCalculatorHelper calculatorHelper = new FrequencyDateCalculatorHelper();
+  CorebankDate eventRawDate = null;
+  CorebankDate freqCalculatedDate = calculatorHelper.calculate(threadContext, frequencyType, lnAmortCreate.getPmtFreqValue().intValue(),
+      lnAmortCreate.getEffectiveDate().toString(), threadContext.getStandardParameters().getOrgunitId(), helper.getOrgCalendar(),
+      helper.getFinYearStartMonthFromOrg());
+  final ArrangementContract contract = ConnectorService.getImplementation(threadContext, ArrangementContract.class);
+  Arrangement arrangement = contract.getArrangementInformation(threadContext, lnAmortCreate.getArrangementIdentification(), null);
+  LNSettlementTransactionHelper settlementhelper = new LNSettlementTransactionHelper();
+  LNPaymentCollectionEventHelper paymentCollectionHelper = new LNPaymentCollectionEventHelper();
+
+  final int days = settlementhelper.getSettlementTypeDays(threadContext, arrangement);
+
+  String processingDay = paymentCollectionHelper.getProcessingDayForPaymentCollection(threadContext);
+
+  eventRawDate = LNDateUtil.calculateDate(threadContext, freqCalculatedDate, days, 0, 0, true);
+  return paymentCollectionHelper.checkEventDateValidity(threadContext, eventRawDate, BusinessDayRule.parseEncodedValue(processingDay), arrangement);
+ }
+}
