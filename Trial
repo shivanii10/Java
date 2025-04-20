@@ -1,0 +1,1420 @@
+/*
+ * =====================================================================
+ * Copyright 2018-2019 Fidelity National Information Services, Inc.
+ * and/or its subsidiaries - All Rights Reserved worldwide.
+ *
+ * This document is protected under the trade secret and copyright
+ * laws as the property of Fidelity National Information Services, Inc.
+ * and/or its subsidiaries.
+ *
+ * Copying, reproduction or distribution should be limited and only to
+ * employees with a "need to know" to do their job.
+ * Any disclosure of this document to third parties
+ * is strictly prohibited.
+ * =====================================================================
+ */
+package com.fis.ec.lending.base.core.main.amortization;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.time.YearMonth;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.fis.ec.base.core.commonclasses.CorebankDate;
+import com.fis.ec.base.core.commonclasses.exceptions.BusinessException;
+import com.fis.ec.base.core.commonclasses.exceptions.ConcurrentUpdateException;
+import com.fis.ec.base.core.commonclasses.exceptions.NotAuthorizedException;
+import com.fis.ec.base.core.commonclasses.exceptions.TechnicalFailureException;
+import com.fis.ec.base.core.serverclasses.ThreadContext;
+import com.fis.ec.base.core.serverclasses.connector.ConnectorService;
+import com.fis.ec.base.core.serverclasses.logging.LogUtility;
+import com.fis.ec.basecharge.core.commonclasses.chargeentity.ChargeEntityIdentification;
+import com.fis.ec.basecharge.core.commonclasses.chargerate.chargerateelement.ChargeRateElement;
+import com.fis.ec.basecharge.core.commonclasses.chargeschedule.ChargeScheduleInstructionDefinition;
+import com.fis.ec.basecharge.core.commonclasses.chargeschedule.ObjectCurrentStatus;
+import com.fis.ec.basecharge.core.commonclasses.dto.chargeinstruction.ChargeInstructionAccruingDto;
+import com.fis.ec.basecharge.core.commonclasses.dto.chargeinstruction.ChargeInstructionDto;
+import com.fis.ec.basecharge.core.commonclasses.dto.chargeinstruction.balancedefinition.BalanceDefinitionDto;
+import com.fis.ec.basecharge.core.commonclasses.dto.chargeinstruction.ratedefinition.ComplexRateDefinitionDto;
+import com.fis.ec.basecharge.core.commonclasses.dto.chargeinstruction.ratedefinition.SimpleRateDefinitionDto;
+import com.fis.ec.basecharge.core.contract.chargeentity.ChargeRateElementContract;
+import com.fis.ec.baseext.core.commonclasses.condition.sets.DurationUnitType;
+import com.fis.ec.baseext.core.commonclasses.condition.sets.FlagType;
+import com.fis.ec.baseext.core.commonclasses.condition.sets.FrequencyType;
+import com.fis.ec.baseext.core.commonclasses.condition.types.AmountCondition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.Condition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.ConditionDetails;
+import com.fis.ec.baseext.core.commonclasses.condition.types.ConditionGroup;
+import com.fis.ec.baseext.core.commonclasses.condition.types.CurrencySpecificCondition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.DurationCondition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.DurationDefinition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.DurationSelectedValue;
+import com.fis.ec.baseext.core.commonclasses.condition.types.FlagCondition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.FrequencyCondition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.FrequencyDefinition;
+import com.fis.ec.baseext.core.commonclasses.condition.types.TextCondition;
+import com.fis.ec.baseext.core.contract.ConditionContainerContract;
+import com.fis.ec.baseproduct.core.commonclasses.common.RelationshipType;
+import com.fis.ec.baseproduct.core.commonclasses.product.condition.ProductConditionRelationship;
+import com.fis.ec.baseproduct.core.commonclasses.product.pricing.ProductPricingRelationship;
+import com.fis.ec.cape.core.arrangement.commonclasses.arrangement.Arrangement;
+import com.fis.ec.cape.core.arrangement.commonclasses.arrangementidentification.ArrangementIdentification;
+import com.fis.ec.cape.core.arrangement.commonclasses.arrangementidentification.ArrangementInternalIdentification;
+import com.fis.ec.cape.core.arrangement.commonclasses.condition.ArrangementConditionRelationship;
+import com.fis.ec.cape.core.arrangement.contract.ArrangementContract;
+import com.fis.ec.cape.core.charge.commonclasses.chargeschedule.ArrangementChargeInquiryContext;
+import com.fis.ec.cape.core.charge.commonclasses.chargeschedule.ArrangementChargeSchedule;
+import com.fis.ec.cape.core.charge.commonclasses.chargeschedule.ArrangementChargeScheduleIdentification;
+import com.fis.ec.cape.core.charge.contract.ArrangementChargeScheduleContract;
+import com.fis.ec.lending.base.core.arrangement.additionaldata.LNTransactionAdditionalData;
+import com.fis.ec.lending.base.core.commonclasses.ComponentNames;
+import com.fis.ec.lending.base.core.commonclasses.LNEnterpriseArrangementType;
+import com.fis.ec.lending.base.core.commonclasses.LendingUtility;
+import com.fis.ec.lending.base.core.commonclasses.SkipPaymentType;
+import com.fis.ec.lending.base.core.commonclasses.amortization.LNAmortizationCalculatorCreate;
+import com.fis.ec.lending.base.core.commonclasses.amortization.LNAmortizationCalculatorDetails.MaturityDetail;
+import com.fis.ec.lending.base.core.commonclasses.amortization.LNAmortizationCalculatorResponseDetails.AmortizationSchedule;
+import com.fis.ec.lending.base.core.commonclasses.amortization.MultiplePaymentFrequencyDetails;
+import com.fis.ec.lending.base.core.commonclasses.billingscheduledefinition.LNBillingComponentDetail;
+import com.fis.ec.lending.base.core.commonclasses.billingscheduledefinition.LNBillingScheduleData;
+import com.fis.ec.lending.base.core.commonclasses.billingscheduledefinition.LNBillingScheduleDef;
+import com.fis.ec.lending.base.core.commonclasses.billingscheduledefinition.relation.LNArBillingScheduleDefRltnp;
+import com.fis.ec.lending.base.core.commonclasses.billingscheduledefinition.relation.LNProdBillScheduleDefRltnp;
+import com.fis.ec.lending.base.core.commonclasses.capitalization.LNArCapitalizationDetails;
+import com.fis.ec.lending.base.core.commonclasses.charge.LNChargeBase;
+import com.fis.ec.lending.base.core.commonclasses.charge.LNChargeBaseContext;
+import com.fis.ec.lending.base.core.commonclasses.common.LNCdarValues;
+import com.fis.ec.lending.base.core.commonclasses.common.LNConstants;
+import com.fis.ec.lending.base.core.commonclasses.message.LNMsg;
+import com.fis.ec.lending.base.core.commonclasses.skippayment.LNArrangementSkipPaymentDetail;
+import com.fis.ec.lending.base.core.commonclasses.transaction.JSONConverter;
+import com.fis.ec.lending.base.core.commonclasses.transaction.common.LNBalanceConstants;
+import com.fis.ec.lending.base.core.contract.billing.billingscheduledefinition.LNArBillingScheduleRelationshipContract;
+import com.fis.ec.lending.base.core.contract.billing.billingscheduledefinition.LNBillingScheduleContract;
+import com.fis.ec.lending.base.core.contract.billing.billingscheduledefinition.LNProdBillSchdlDfnRltnpContract;
+import com.fis.ec.lending.base.core.contract.charge.LNChargeContract;
+import com.fis.ec.lending.base.core.contract.skippayment.LNArSkipPaymentsRltnpContract;
+import com.fis.ec.lending.base.core.main.arrangement.LNArrangementHelper;
+import com.fis.ec.lending.base.core.main.arrangement.additionaldata.LNTransactionAdditionalDataHelper;
+import com.fis.ec.lending.base.core.main.arrangement.capitalization.LNArCapitalizationController;
+import com.fis.ec.lending.base.core.main.arrangement.dateutils.LNDateCalculatorForDuration;
+import com.fis.ec.lending.base.core.main.balance.helper.LNBalanceHelper;
+import com.fis.ec.lending.base.core.main.billingandrepaymentdetail.LNMultipleFrequencyHelper;
+import com.fis.ec.lending.base.core.main.charge.helper.LNChargeHelper;
+import com.fis.ec.lending.base.core.main.common.LNBaseValidator;
+import com.fis.ec.lending.base.core.main.common.LNConditionHelper;
+import com.fis.ec.lending.base.core.main.condition.LNAccountConditionHelper;
+import com.fis.ec.lending.base.core.main.condition.LNConditionCacheHelper;
+import com.fis.ec.lending.base.core.main.frequency.helper.LNFrequencyDateCalculatorHelper;
+import com.fis.ec.lending.base.core.main.loantermextension.LNArExtensionScheduleCalculatorHelper;
+import com.fis.ec.lending.base.core.main.loc.helper.LnLOCTermoutHelper;
+import com.fis.ec.lending.base.core.main.product.LNProductHelper;
+import com.fis.ec.lending.base.core.main.simulation.util.LNRpymntSchedule;
+
+public class LNAmortizationCalculatorController {
+  private static final String CLASS_NAME = LNAmortizationCalculatorController.class.getName();
+  private static final String COMPONENT_NAME = ComponentNames.EC_LN_BASE;
+  private static final Logger LOG = LogManager.getLogger(CLASS_NAME);
+  private final ThreadContext threadContext;
+
+  public LNAmortizationCalculatorController(final ThreadContext threadContext) {
+    this.threadContext = threadContext;
+  }
+
+  /**
+   * @param threadContext
+   * @param input
+   * @return
+   */
+  public LNAmortizationCalculatorCreate getRepaymentDetails(
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    LogUtility.entering(LOG, CLASS_NAME, "getRepaymentDetails", threadContext, COMPONENT_NAME);
+    /* Assigning the OUID belonging to the arrangement in the threadcontext */
+
+    if (input.getArrangementIdentification() != null) {
+      final Arrangement arrangement =
+          new LNArrangementHelper(threadContext)
+              .getArrangementInformation(threadContext, input.getArrangementIdentification());
+
+      if (arrangement.getOrganizationUnitIdentifier() != null
+          && !"".equals(arrangement.getOrganizationUnitIdentifier())) {
+        threadContext
+            .getStandardParameters()
+            .setOrgunitId(arrangement.getOrganizationUnitIdentifier());
+      }
+    }
+    mapCalcDetailsFromProduct(threadContext, input);
+    mapDetailsFromArrangement(threadContext, input);
+    if (input.getMultiplePaymentFrequencyDetailsList() == null
+        && input.getArrangementIdentification() != null) {
+      final Arrangement arrangement =
+          new LNArrangementHelper(threadContext)
+              .getArrangementInformation(threadContext, input.getArrangementIdentification());
+      LNMultipleFrequencyHelper multFrequencyHelper = new LNMultipleFrequencyHelper();
+      CorebankDate firstPymntDate =
+          multFrequencyHelper.getFrstPaymentDate(threadContext, arrangement);
+      if (firstPymntDate != null) {
+        input.setFirstPaymentDate(firstPymntDate);
+      }
+    }
+    if (input.getMaturityDetails() == null) {
+      getRepaymentDetailWithoutTerm(input);
+
+    } else {
+      input.setLNAmortizationCalculatorResponseDetails(
+          new LNRpymntSchedule().getRpymntDetails(threadContext, input));
+    }
+
+    return input;
+  }
+
+  private void getRepaymentDetailWithoutTerm(LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    getLoanTerm(null, input, RoundingMode.HALF_UP);
+    getSkipPaymentFromInput(threadContext, input);
+    input.setLNAmortizationCalculatorResponseDetails(
+        new LNRpymntSchedule().getRpymntDetails(threadContext, input));
+
+    AmortizationSchedule lastAmortizationSchedule =
+        input
+            .getLNAmortizationCalculatorResponseDetails()
+            .getAmortizSchedule()
+            .get(
+                input.getLNAmortizationCalculatorResponseDetails().getAmortizSchedule().size() - 1);
+
+    if (lastAmortizationSchedule.getPrincipalDueAmount() == BigDecimal.ZERO) {
+      input.setMaturityDetails(null);
+      getLoanTerm(null, input, RoundingMode.FLOOR);
+      input.setLNAmortizationCalculatorResponseDetails(
+          new LNRpymntSchedule().getRpymntDetails(threadContext, input));
+    }
+  }
+
+  private void mapCalcDetailsFromProduct(
+      final ThreadContext threadContext, final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    if (input.getProductCode() != null && input.getProductCode().length() > 0) {
+      final CorebankDate asOfDate =
+          null != input.getEffectiveDate()
+              ? input.getEffectiveDate()
+              : threadContext.getStandardParameters().getBookingDate();
+      final String productCode = input.getProductCode();
+      final LNProductHelper productHelper = new LNProductHelper();
+      final ProductConditionRelationship productConditionRelationshipList =
+          productHelper.getConditionList(threadContext, productCode, asOfDate);
+      final long productIdentifier =
+          productHelper.getDetails(threadContext, productCode, asOfDate).getIdentifier();
+      final List<ProductPricingRelationship> productPricingRelationshipList =
+          productHelper.getProductPricingChargeScheduleDetail(threadContext, productIdentifier);
+
+      final List<ConditionDetails> conditionDetails =
+          productConditionRelationshipList.getConditionDetailsList();
+      for (final ConditionDetails conditionDtl : conditionDetails) {
+        final Condition condition = conditionDtl.getCondition();
+        processCondition(input, condition);
+      }
+      getIntRateAndCalcBasisDetailFromProduct(threadContext, productPricingRelationshipList, input);
+
+      getPaymentTypeAndCalOptionFromProduct(threadContext, productIdentifier, input);
+    }
+  }
+
+  private void mapDetailsFromArrangement(
+      final ThreadContext threadContext, final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    if (input.getArrangementIdentification() != null) {
+      final Arrangement arrangement =
+          new LNArrangementHelper(threadContext)
+              .getArrangementInformation(threadContext, input.getArrangementIdentification());
+      input.setCurrencyCode(arrangement.getCurrencyCode());
+
+      final Map<String, ArrangementConditionRelationship> conditionRelationshipMap =
+          new LNConditionCacheHelper()
+              .getCachedConditionDetailMap(
+                  threadContext, input.getArrangementIdentification(), input.getEffectiveDate());
+
+      if (LendingUtility.isNotEmptyMap(conditionRelationshipMap)) {
+        final Iterator<String> iterator = conditionRelationshipMap.keySet().iterator();
+        while (iterator.hasNext()) {
+          final String key = iterator.next();
+          final Condition condition = conditionRelationshipMap.get(key).getCondition();
+          processCondition(input, condition);
+        }
+      }
+
+      final Condition condition =
+          new LNConditionHelper(threadContext)
+              .getProductConditionDetails(
+                  threadContext,
+                  arrangement.getProduct(),
+                  LNCdarValues.INTEREST_PROCESSING.getCode(),
+                  true);
+      if (condition != null) {
+        processCondition(input, condition);
+      }
+      getCalcBasisAndIntRateForArrangement(threadContext, arrangement, input);
+      // Fetch payment type & payment cal option from billing schedule definition from
+      // arrangement.
+      getPaymentTypeAndCalOptionForArrangement(threadContext, input);
+
+      getSkipPaymentForArrangement(threadContext, arrangement, input);
+
+      // To map the promotional and delinquency skip dates on arrangement
+      final LNArExtensionScheduleCalculatorHelper extensionHelper =
+          new LNArExtensionScheduleCalculatorHelper();
+      extensionHelper.getSkipExtnPaymentForArrangement(threadContext, arrangement, input);
+      getArAmortizationToleranceAmt(threadContext, input);
+      getCapitalizationDetailsForArrangement(threadContext, arrangement, input);
+    }
+    getSkipPaymentFromInput(threadContext, input);
+  }
+
+  private void getArAmortizationToleranceAmt(
+      ThreadContext threadContext, LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    final Arrangement arrangement =
+        new LNArrangementHelper(threadContext)
+            .getArrangementInformation(threadContext, input.getArrangementIdentification());
+    final Condition cdn =
+        new LNConditionHelper(threadContext)
+            .getProductConditionDetails(
+                threadContext,
+                arrangement.getProduct(),
+                LNCdarValues.AMORTIZATION_TOLERANCE.getCode(),
+                true);
+    if (cdn != null) {
+      final Map<String, ConditionDetails> memberCondition =
+          ((ConditionGroup) cdn).getMemberConditions();
+      if (memberCondition != null
+          && memberCondition.get(LNCdarValues.AMORTIZATION_TOLERANCE_AMOUNT.getCode()) != null) {
+        final CurrencySpecificCondition curncyCdn =
+            (CurrencySpecificCondition)
+                memberCondition
+                    .get(LNCdarValues.AMORTIZATION_TOLERANCE_AMOUNT.getCode())
+                    .getCondition();
+        final AmountCondition amtCdn =
+            (AmountCondition) curncyCdn.getCurrencySpecificDetailsList().get(0).getCondition();
+
+        input.setAmortizationToleranceAmount(amtCdn.getAmount());
+      }
+    }
+  }
+
+  private void getSkipPaymentForArrangement(
+      final ThreadContext threadContext,
+      final Arrangement arrangement,
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    final LNArSkipPaymentsRltnpContract lnArSkipPaymentsRltnpContract =
+        ConnectorService.getImplementation(threadContext, LNArSkipPaymentsRltnpContract.class);
+    var arrangementIdentification =
+        new ArrangementInternalIdentification(arrangement.getArrangementIdentifier());
+    if (input.getPrimaryArrangementIdentification() != null) {
+      arrangementIdentification =
+          (ArrangementInternalIdentification) input.getPrimaryArrangementIdentification();
+    }
+    final List<LNArrangementSkipPaymentDetail> arrangementSkipPaymentDetails =
+        lnArSkipPaymentsRltnpContract.getArrangementSkipPaymentList(
+            threadContext, arrangementIdentification, null);
+    final FrequencyType frequencyType = FrequencyType.parseEncodedValue(input.getPmtFreqType());
+    final CorebankDate maturityDate = input.getMaturityDetails().getMaturityDate();
+    final List<CorebankDate> skipPaymentList = new ArrayList<>();
+    CorebankDate effectiveDate = input.getEffectiveDate();
+    do {
+      final LNFrequencyDateCalculatorHelper frequencyDateCalculatorHelper =
+          new LNFrequencyDateCalculatorHelper();
+      final CorebankDate nextDueDate =
+          frequencyDateCalculatorHelper.calculateNextPaymentDate(
+              threadContext,
+              frequencyType,
+              input.getPmtFreqValue() == null
+                  ? 0
+                  : Integer.valueOf(input.getPmtFreqValue().toString()),
+              effectiveDate.toString(),
+              null,
+              0);
+
+      for (final LNArrangementSkipPaymentDetail lnArrangementSkipPaymentDetail :
+          arrangementSkipPaymentDetails) {
+        Object skipPaymentType = getAdditionalInfo(lnArrangementSkipPaymentDetail);
+        if ((!input.isExcludeInheritedSkipDetails() && skipPaymentType == null)
+            || (input.isExcludeInheritedSkipDetails()
+                && skipPaymentType != null
+                && skipPaymentType.equals(LNConstants.RENEWAL_SKIP_TYPE))) {
+          addSkipDates(input, skipPaymentList, nextDueDate, lnArrangementSkipPaymentDetail);
+        }
+      }
+      effectiveDate = nextDueDate;
+    } while (maturityDate.compareTo(effectiveDate) > 0);
+
+    input.getSkipPaymentDates().put(SkipPaymentType.REGISTEREDSKIPPAYMENT, skipPaymentList);
+  }
+
+  private void addSkipDates(
+      final LNAmortizationCalculatorCreate input,
+      final List<CorebankDate> skipPaymentList,
+      final CorebankDate nextDueDate,
+      final LNArrangementSkipPaymentDetail lnArrangementSkipPaymentDetail) {
+    if (lnArrangementSkipPaymentDetail.getStrtDte().compareTo(nextDueDate) <= 0
+        && (lnArrangementSkipPaymentDetail.getEndDte() == null
+            || lnArrangementSkipPaymentDetail.getEndDte().compareTo(nextDueDate) >= 0)) {
+      final YearMonth yearmonth =
+          YearMonth.of(
+              Integer.valueOf(nextDueDate.toString().substring(0, 4)),
+              Integer.valueOf(nextDueDate.toString().substring(5, 7)));
+      addSkipPaymentDate(skipPaymentList, nextDueDate, lnArrangementSkipPaymentDetail, yearmonth);
+      input
+          .getEarnDurSkpPmtInd()
+          .put(nextDueDate, lnArrangementSkipPaymentDetail.isEarnDurSkpPmtInd());
+    }
+  }
+
+  public Object getAdditionalInfo(
+      final LNArrangementSkipPaymentDetail lnArrangementSkipPaymentDetail)
+      throws TechnicalFailureException {
+
+    Object skipPaymentType = null;
+    if (lnArrangementSkipPaymentDetail.getAdditionalInformation() != null
+        && !lnArrangementSkipPaymentDetail.getAdditionalInformation().isEmpty()) {
+      final Map<String, Object> additionalInfo =
+          lnArrangementSkipPaymentDetail.getAdditionalInformation();
+      for (Entry<String, Object> key : additionalInfo.entrySet()) {
+        if (key.getKey().equals(LNConstants.SKIP_PAYMENT_TYPE)) {
+          skipPaymentType = key.getValue();
+        }
+      }
+    }
+    return skipPaymentType;
+  }
+
+  private void getSkipPaymentFromInput(
+      final ThreadContext threadContext, final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+
+    final List<LNArrangementSkipPaymentDetail> arrangementSkipPaymentDetails =
+        input.getLnSkipPaymentList();
+    final FrequencyType frequencyType = FrequencyType.parseEncodedValue(input.getPmtFreqType());
+    if (null != input.getMaturityDetails()
+        && null != input.getMaturityDetails().getMaturityDate()) {
+      final CorebankDate maturityDate = input.getMaturityDetails().getMaturityDate();
+      final List<CorebankDate> skipPaymentList = new ArrayList<>();
+      CorebankDate effectiveDate = input.getEffectiveDate();
+      do {
+        final LNFrequencyDateCalculatorHelper frequencyDateCalculatorHelper =
+            new LNFrequencyDateCalculatorHelper();
+        final CorebankDate nextDueDate =
+            frequencyDateCalculatorHelper.calculateNextPaymentDate(
+                threadContext,
+                frequencyType,
+                input.getPmtFreqValue() == null
+                    ? 0
+                    : Integer.valueOf(input.getPmtFreqValue().toString()),
+                effectiveDate.toString(),
+                null,
+                0);
+        setSkipPaymentDetails(arrangementSkipPaymentDetails, skipPaymentList, nextDueDate);
+        effectiveDate = nextDueDate;
+      } while (maturityDate.compareTo(effectiveDate) > 0);
+      if (!skipPaymentList.isEmpty()) {
+        if (null != input.getSkipPaymentDates()
+            && input.getSkipPaymentDates().get(SkipPaymentType.REGISTEREDSKIPPAYMENT) != null) {
+          input
+              .getSkipPaymentDates()
+              .get(SkipPaymentType.REGISTEREDSKIPPAYMENT)
+              .addAll(skipPaymentList);
+        } else {
+          ConcurrentHashMap<SkipPaymentType, List<CorebankDate>> skipPaymentMap =
+              new ConcurrentHashMap<>();
+          skipPaymentMap.put(SkipPaymentType.REGISTEREDSKIPPAYMENT, skipPaymentList);
+          input.setSkipPaymentDates(skipPaymentMap);
+        }
+      }
+    }
+  }
+
+  private void setSkipPaymentDetails(
+      final List<LNArrangementSkipPaymentDetail> arrangementSkipPaymentDetails,
+      final List<CorebankDate> skipPaymentList,
+      final CorebankDate nextDueDate) {
+    ConcurrentHashMap<CorebankDate, Boolean> skipPaymentDetailsMap = new ConcurrentHashMap<>();
+    if (arrangementSkipPaymentDetails != null) {
+      for (final LNArrangementSkipPaymentDetail lnArrangementSkipPaymentDetail :
+          arrangementSkipPaymentDetails) {
+        if (lnArrangementSkipPaymentDetail.getStrtDte().compareTo(nextDueDate) <= 0
+            && (lnArrangementSkipPaymentDetail.getEndDte() == null
+                || lnArrangementSkipPaymentDetail.getEndDte().compareTo(nextDueDate) >= 0)) {
+          final YearMonth yearmonth =
+              YearMonth.of(
+                  Integer.valueOf(nextDueDate.toString().substring(0, 4)),
+                  Integer.valueOf(nextDueDate.toString().substring(5, 7)));
+          addSkipPaymentDate(
+              skipPaymentList, nextDueDate, lnArrangementSkipPaymentDetail, yearmonth);
+          skipPaymentDetailsMap.put(
+              nextDueDate, lnArrangementSkipPaymentDetail.isEarnDurSkpPmtInd());
+        }
+      }
+    }
+  }
+
+  private void addSkipPaymentDate(
+      final List<CorebankDate> skipPaymentList,
+      final CorebankDate nextDueDate,
+      final LNArrangementSkipPaymentDetail lnArrangementSkipPaymentDetail,
+      final YearMonth yearmonth) {
+    if (lnArrangementSkipPaymentDetail
+        .getSkippedMonths()
+        .contains(yearmonth.getMonth().toString())) {
+      skipPaymentList.add(nextDueDate);
+    }
+  }
+
+  public void getCalcBasisAndIntRateForArrangement(
+      final ThreadContext threadContext,
+      final Arrangement arrangement,
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+
+    final ArrangementChargeScheduleContract arrangementChargeScheduleContract =
+        ConnectorService.getImplementation(threadContext, ArrangementChargeScheduleContract.class);
+
+    final ArrangementChargeInquiryContext inquiryContext = new ArrangementChargeInquiryContext();
+    inquiryContext.setArrangement(arrangement);
+    inquiryContext.setAsOfDate(
+        input.getInterestCalculationEffctiveDate() != null
+            ? input.getInterestCalculationEffctiveDate()
+            : input.getEffectiveDate());
+    final ArrangementChargeScheduleIdentification identification =
+        new ArrangementChargeScheduleIdentification(arrangement.getArrangementIdentifier(), 0L);
+
+    inquiryContext.setIdentification(identification);
+    inquiryContext.setObjectStatus(arrangement.getObjectStatus());
+
+    final List<ArrangementChargeSchedule> approvedChargeSchedulesList =
+        arrangementChargeScheduleContract.inquireChargeSchedules(threadContext, inquiryContext);
+    BigDecimal initialIntRate = BigDecimal.ZERO;
+    Boolean isInsIntrest = false;
+    if (approvedChargeSchedulesList != null) {
+      for (final ArrangementChargeSchedule chargeSchedulesList : approvedChargeSchedulesList) {
+        if (chargeSchedulesList.getInstructionDefinitions() != null) {
+          // Added new Parameter debitIntRate to handle when multiple Accural instruction
+          // is present
+          // i.e along with Debit Interest if Dealer is present
+          // Interest rate
+          // will be Sum of all interest.
+          isInsIntrest =
+              mapInterestAndCalcBasis(
+                  threadContext,
+                  input,
+                  chargeSchedulesList,
+                  arrangement,
+                  initialIntRate,
+                  isInsIntrest);
+          if (isInsIntrest) {
+            initialIntRate = input.getInterestRate();
+          }
+        }
+      }
+    }
+  }
+
+  private Boolean mapInterestAndCalcBasis(
+      final ThreadContext threadContext,
+      final LNAmortizationCalculatorCreate input,
+      final ArrangementChargeSchedule chargeSchedulesList,
+      final Arrangement arrangement,
+      BigDecimal initialIntRate,
+      Boolean isInsIntrest)
+      throws TechnicalFailureException, BusinessException {
+
+    if (arrangement
+        .getEnterpriseArrangementType()
+        .equals(LNEnterpriseArrangementType.BUYNOW_PAYLATER.getCode())) {
+      input.setInterestRate(BigDecimal.ZERO);
+    }
+    String chargeTypeCode;
+    for (final ChargeScheduleInstructionDefinition instructionDefinitions :
+        chargeSchedulesList.getInstructionDefinitions()) {
+      chargeTypeCode =
+          instructionDefinitions.getChargeInstruction().getChargeType().getChargeTypeCode();
+      if (LNConstants.DEBIT_INTEREST.equalsIgnoreCase(chargeTypeCode)
+          || LNConstants.DEALER.equalsIgnoreCase(chargeTypeCode)) {
+        final LNChargeHelper lnChargeHelper = new LNChargeHelper(threadContext);
+        final ChargeInstructionAccruingDto chargeInstructionDto =
+            (ChargeInstructionAccruingDto)
+                lnChargeHelper.getChargeInstruction(
+                    threadContext,
+                    chargeSchedulesList.getChargeScheduleIdentifier(),
+                    instructionDefinitions.getChargeInstructionIdentifier());
+        if (input.getInterestRate() == null || isInsIntrest) {
+          isInsIntrest =
+              setInstRte(
+                  threadContext,
+                  input,
+                  chargeSchedulesList,
+                  arrangement,
+                  initialIntRate,
+                  instructionDefinitions);
+        }
+
+        setCalculationBasis(input, chargeInstructionDto);
+        break;
+      }
+    }
+    return isInsIntrest;
+  }
+
+  private Boolean setInstRte(
+      final ThreadContext threadContext,
+      final LNAmortizationCalculatorCreate input,
+      final ArrangementChargeSchedule chargeSchedulesList,
+      final Arrangement arrangement,
+      BigDecimal initialIntRate,
+      final ChargeScheduleInstructionDefinition instructionDefinitions)
+      throws TechnicalFailureException, BusinessException {
+    Boolean isInsIntrest;
+    isInsIntrest = true;
+    final LNChargeBase lnChargeBaseInput = new LNChargeBaseContext();
+    lnChargeBaseInput.setArrangementNumber(arrangement.getArrangementNumber());
+    lnChargeBaseInput.setArrangement(arrangement);
+    lnChargeBaseInput.setProcessingDate(
+        input.getInterestCalculationEffctiveDate() != null
+            ? input.getInterestCalculationEffctiveDate()
+            : input.getEffectiveDate());
+    lnChargeBaseInput.setChargeInstructionCode(instructionDefinitions.getChargeInstructionCode());
+    lnChargeBaseInput.setChargeScheduleCode(chargeSchedulesList.getChargeScheduleCode());
+    final LNChargeContract lnChargeContract =
+        ConnectorService.getImplementation(threadContext, LNChargeContract.class);
+
+    BigDecimal intRate =
+        lnChargeContract.inquireCurrentInterestRate(threadContext, lnChargeBaseInput, null);
+
+    if (input.getInterestRate() != null) {
+      input.setInterestRate(initialIntRate.add(intRate));
+
+    } else {
+      input.setInterestRate(intRate);
+    }
+    return isInsIntrest;
+  }
+
+  private void setCalculationBasis(
+      final LNAmortizationCalculatorCreate input,
+      final ChargeInstructionAccruingDto chargeInstructionDto) {
+    if (input.getDayCount() == null) {
+      final String dayBasis = chargeInstructionDto.getDayCountMethod();
+      input.setDayCount(dayBasis);
+    }
+    if (input.getLeapYrBasis() == null) {
+      final String leapYearBasis = chargeInstructionDto.getYearBasis().getLeapYearDivisor();
+      input.setLeapYrBasis(leapYearBasis);
+    }
+    if (input.getNonLeapYrBasis() == null) {
+      final String nonLeapYearBasis = chargeInstructionDto.getYearBasis().getLeapYearDivisor();
+      input.setNonLeapYrBasis(nonLeapYearBasis);
+    }
+  }
+
+  private void getIntRateAndCalcBasisDetailFromProduct(
+      final ThreadContext threadContext,
+      final List<ProductPricingRelationship> productPricingRelationshipList,
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+
+    final LNChargeHelper lnChargeHelper = new LNChargeHelper(threadContext);
+    BigDecimal debitIntRate = BigDecimal.ZERO;
+    Boolean isInsIntrest = false;
+    for (final ProductPricingRelationship productPricingRelationship :
+        productPricingRelationshipList) {
+      final ChargeInstructionDto chargeAccrdInstructionDto =
+          lnChargeHelper.getChargeInstruction(
+              threadContext,
+              productPricingRelationship.getChargeScheduleIdentifier(),
+              productPricingRelationship.getChargeInstructionIdentifier());
+      if (chargeAccrdInstructionDto != null
+          && chargeAccrdInstructionDto instanceof ChargeInstructionAccruingDto
+          && (productPricingRelationship.getRelationshipType() == RelationshipType.PROPOSED
+              || productPricingRelationship.getRelationshipType() == RelationshipType.MANDATORY)) {
+        final ChargeInstructionAccruingDto chargeInstructionDto =
+            (ChargeInstructionAccruingDto) chargeAccrdInstructionDto;
+        final ComplexRateDefinitionDto complexRateDefinitionDto =
+            chargeInstructionDto
+                .getBalanceDefinitions()
+                .get(0)
+                .getAssociatedRate()
+                .getComplexRate();
+        // Added new Parameter debitIntRate to handle when multiple Accural instruction
+        // is present
+        // i.e along with Debit Interest instruction if Dealer instruction is present
+        // intrest rate
+        // will be Sum of all interest
+        isInsIntrest =
+            updateIntreastRate(
+                input, complexRateDefinitionDto, chargeInstructionDto, debitIntRate, isInsIntrest);
+        if (isInsIntrest) {
+          debitIntRate = input.getInterestRate();
+        }
+        setCalculationBasis(input, chargeInstructionDto);
+      }
+    }
+  }
+
+  private Boolean updateIntreastRate(
+      final LNAmortizationCalculatorCreate input,
+      final ComplexRateDefinitionDto complexRateDefinitionDto,
+      final ChargeInstructionAccruingDto chargeInstructionDto,
+      BigDecimal debitIntRate,
+      Boolean isInsIntrest)
+      throws BusinessException, TechnicalFailureException {
+    BigDecimal intRate;
+    if (input.getInterestRate() == null
+        || input.getInterestRate().compareTo(BigDecimal.ZERO) <= 0
+        || isInsIntrest) {
+      isInsIntrest = true;
+      if (complexRateDefinitionDto == null
+          && chargeInstructionDto.getBalanceDefinitions().get(0).getComplexBalance() != null) {
+
+        intRate =
+            getTieredRate(
+                chargeInstructionDto.getBalanceDefinitions(), input.getContractualAmount());
+      } else if (complexRateDefinitionDto == null) {
+        intRate =
+            chargeInstructionDto
+                .getBalanceDefinitions()
+                .get(0)
+                .getAssociatedRate()
+                .getCurrentApplicableRate();
+      } else if (complexRateDefinitionDto.getSimpleRateDefinitions() != null
+          && complexRateDefinitionDto.getSimpleRateDefinitions().get(0).getRateElementIdentifier()
+              == null) {
+        intRate = complexRateDefinitionDto.getSimpleRateDefinitions().get(0).getSimpleRate();
+
+      } else {
+        intRate =
+            getCRECurrentRate(
+                threadContext,
+                complexRateDefinitionDto
+                    .getSimpleRateDefinitions()
+                    .get(0)
+                    .getRateElementIdentifier(),
+                null);
+      }
+      final BigDecimal marginRate = getMarginRate(chargeInstructionDto.getBalanceDefinitions());
+      intRate = intRate.add(marginRate);
+      if (input.getInterestRate() != null) {
+        input.setInterestRate(debitIntRate.add(intRate));
+
+      } else {
+
+        input.setInterestRate(intRate);
+      }
+    }
+    return isInsIntrest;
+  }
+
+  private BigDecimal getMarginRate(final List<BalanceDefinitionDto> balanceDefinitionDtos) {
+    if (!balanceDefinitionDtos.isEmpty()) {
+      for (final BalanceDefinitionDto balanceDefinitionDto : balanceDefinitionDtos) {
+        if (balanceDefinitionDto.getAssociatedRate().getComplexRate() != null) {
+          final List<SimpleRateDefinitionDto> simpleDefnList =
+              balanceDefinitionDto.getAssociatedRate().getComplexRate().getSimpleRateDefinitions();
+          for (final SimpleRateDefinitionDto simpleRateDefinitionDto : simpleDefnList) {
+            if (isRateElementNotPresentNdRateIdfrPresent(simpleRateDefinitionDto)) {
+              // margin Rate
+              return simpleRateDefinitionDto.getSimpleRate();
+            }
+          }
+        }
+      }
+    }
+    return BigDecimal.ZERO;
+  }
+
+  private boolean isRateElementNotPresentNdRateIdfrPresent(
+      final SimpleRateDefinitionDto simpleRateDefinitionDto) {
+    return simpleRateDefinitionDto.getRateElementIdentifier() == null
+        && simpleRateDefinitionDto.getRateTypeIdfr() != null;
+  }
+
+  private BigDecimal getTieredRate(
+      final List<BalanceDefinitionDto> balanceDefinitionDtos, final BigDecimal contractualAmount)
+      throws BusinessException, TechnicalFailureException {
+    BigDecimal lowRange;
+    BigDecimal highRange = BigDecimal.ZERO;
+    BigDecimal rate = BigDecimal.ZERO;
+    for (final BalanceDefinitionDto balanceDefinitionDto : balanceDefinitionDtos) {
+      lowRange =
+          balanceDefinitionDto.getComplexBalance().getLowBalanceRangeAmount().getSimpleAmount();
+      if (balanceDefinitionDto.getComplexBalance().getHighBalanceRangeAmount() != null) {
+        highRange =
+            balanceDefinitionDto.getComplexBalance().getHighBalanceRangeAmount().getSimpleAmount();
+      }
+      if (lowRange.compareTo(contractualAmount) < 0
+          && contractualAmount.compareTo(highRange) <= 0) {
+        rate = balanceDefinitionDto.getAssociatedRate().getCurrentApplicableRate();
+        if (rate == null) {
+          rate =
+              getCRECurrentRate(
+                  threadContext,
+                  balanceDefinitionDto
+                      .getAssociatedRate()
+                      .getSimpleRateDefinition()
+                      .getRateElementIdentifier(),
+                  threadContext.getStandardParameters().getBookingDate());
+        }
+        break;
+      }
+    }
+    return rate;
+  }
+
+  private BigDecimal getCRECurrentRate(
+      final ThreadContext threadContext,
+      final Long rateElementIdentifier,
+      final CorebankDate asOfDate)
+      throws BusinessException, TechnicalFailureException {
+    BigDecimal result = BigDecimal.ZERO;
+    final ChargeEntityIdentification identification =
+        new ChargeEntityIdentification(rateElementIdentifier);
+    final ChargeRateElementContract contract =
+        ConnectorService.getImplementation(threadContext, ChargeRateElementContract.class);
+    final ChargeRateElement element =
+        contract.getApprovedChargeRateElement(threadContext, identification, asOfDate);
+    if (element != null) {
+      result = element.getCurrentRate();
+    }
+    return result;
+  }
+
+  private void processCondition(
+      final LNAmortizationCalculatorCreate input, final Condition condition)
+      throws BusinessException, TechnicalFailureException {
+
+    if (condition instanceof ConditionGroup
+        && condition.getCdarValue().equals(LNCdarValues.LOAN_BASIC_DETAILS.getCode())) {
+      final Map<String, ConditionDetails> memberCondition =
+          ((ConditionGroup) condition).getMemberConditions();
+      if (input.getContractualAmount() == null
+          || input.getContractualAmount().compareTo(BigDecimal.ZERO) <= 0) {
+        getContractualAmount(memberCondition, input);
+      }
+
+      if (input.getMaturityDetails() == null) {
+        getLoanTerm(memberCondition, input, RoundingMode.HALF_UP);
+      }
+    } // Rate Determination basis
+    if (condition instanceof ConditionGroup
+        && condition.getCdarValue().equals(LNCdarValues.INTEREST_PROCESSING.getCode())) {
+      getRateDeterminnationBasis(condition, input);
+    }
+    if (condition instanceof ConditionGroup
+        && condition.getCdarValue().equals(LNCdarValues.LOAN_PAYMENT.getCode())) {
+      getPaymentFrequencyDetails(condition, input);
+    }
+    if (condition instanceof ConditionGroup
+        && condition.getCdarValue().equals(LNCdarValues.AMORTIZATION_TOLERANCE.getCode())) {
+      getAmortizationToleranceDetails(condition, input);
+    }
+  }
+
+  private void getCapitalizationDetailsForArrangement(
+      ThreadContext threadContext,
+      Arrangement arrangement,
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    final ArrangementIdentification arrangementIdentification =
+        new ArrangementInternalIdentification(arrangement.getArrangementIdentifier());
+
+    LNArCapitalizationController lnArCapitalizationController = new LNArCapitalizationController();
+    List<LNArCapitalizationDetails> lnArCapitalizationDetails =
+        lnArCapitalizationController.getListArCapitalizationDetails(
+            threadContext, arrangementIdentification);
+    if (!lnArCapitalizationDetails.isEmpty()) {
+      if (lnArCapitalizationDetails.get(0).isAutoCapitalization()) {
+        if (null != lnArCapitalizationDetails.get(0).getUserDefinedFrequency()) {
+          input.setCapitalizationFreqType(
+              lnArCapitalizationDetails.get(0).getUserDefinedFrequency().getType());
+          if (null != lnArCapitalizationDetails.get(0).getUserDefinedFrequency().getValue()) {
+            input.setCapitalizationFreqValue(
+                BigInteger.valueOf(
+                    Long.valueOf(
+                        lnArCapitalizationDetails.get(0).getUserDefinedFrequency().getValue())));
+          }
+        } else if (null != lnArCapitalizationDetails.get(0).getCapitalizationFrequencyOption()
+            && lnArCapitalizationDetails
+                .get(0)
+                .getCapitalizationFrequencyOption()
+                .equalsIgnoreCase("PaymentFrequency")) {
+          final LNAccountConditionHelper condHelper = new LNAccountConditionHelper(threadContext);
+          String cdarValue = lnArCapitalizationDetails.get(0).getCapitalizationFrequencyOption();
+          final ArrangementConditionRelationship paymentFrequencyConditionRltnp =
+              condHelper.getConditionDetail(
+                  threadContext, arrangementIdentification, cdarValue, input.getEffectiveDate());
+
+          final FrequencyCondition frequencyCondition =
+              (FrequencyCondition) paymentFrequencyConditionRltnp.getCondition();
+          final FrequencyDefinition frequencyDefinition =
+              frequencyCondition.getFrequencyDefinition().clone();
+          input.setCapitalizationFreqType(frequencyDefinition.getPrimaryFrequencyType());
+          if (frequencyDefinition.getPrimaryUnits() != null) {
+            input.setCapitalizationFreqValue(
+                BigInteger.valueOf(Long.valueOf(frequencyDefinition.getPrimaryUnits())));
+          }
+        }
+        if (null != lnArCapitalizationDetails.get(0).getCapitalizationEffDate()) {
+          input.setCapitalizationStartDate(
+              lnArCapitalizationDetails.get(0).getCapitalizationEffDate());
+        } else {
+          input.setCapitalizationStartDate(input.getEffectiveDate());
+        }
+        if (null != lnArCapitalizationDetails.get(0).getCapitalizationEndDate()) {
+          input.setCapitalizationEndDate(
+              lnArCapitalizationDetails.get(0).getCapitalizationEndDate());
+        } else {
+          input.setCapitalizationEndDate(input.getMaturityDetails().getMaturityDate());
+        }
+      }
+    }
+  }
+
+  private void getAmortizationToleranceDetails(
+      Condition condition, LNAmortizationCalculatorCreate input) {
+    final Map<String, ConditionDetails> memberCondition =
+        ((ConditionGroup) condition).getMemberConditions();
+    if (memberCondition != null
+        && memberCondition.get(LNCdarValues.AMORTIZATION_TOLERANCE_AMOUNT.getCode()) != null) {
+      final CurrencySpecificCondition curncyCdn =
+          (CurrencySpecificCondition)
+              memberCondition
+                  .get(LNCdarValues.AMORTIZATION_TOLERANCE_AMOUNT.getCode())
+                  .getCondition();
+      final AmountCondition amtCdn =
+          (AmountCondition) curncyCdn.getCurrencySpecificDetailsList().get(0).getCondition();
+
+      input.setAmortizationToleranceAmount(amtCdn.getAmount());
+    }
+  }
+
+  private void getPaymentFrequencyDetails(
+      final Condition condition, final LNAmortizationCalculatorCreate input) {
+    final Map<String, ConditionDetails> memberCondition =
+        ((ConditionGroup) condition).getMemberConditions();
+    if (memberCondition != null
+        && memberCondition.get(LNCdarValues.PAYMENT_FREQUENCY.getCode()) != null
+        && input.getPmtFreqType() == null) {
+      final FrequencyCondition frqcdn =
+          (FrequencyCondition)
+              memberCondition.get(LNCdarValues.PAYMENT_FREQUENCY.getCode()).getCondition();
+      final String frequencyType = frqcdn.getFrequencyDefinition().getPrimaryFrequencyType();
+      input.setPmtFreqType(frequencyType);
+      if (frqcdn.getFrequencyDefinition().getPrimaryUnits() != null) {
+        input.setPmtFreqValue(
+            BigInteger.valueOf(frqcdn.getFrequencyDefinition().getPrimaryUnits()));
+      }
+      if (frqcdn.getFrequencyDefinition().getSecondaryUnits() != null) {
+        input.setPmtFreqValue(
+            BigInteger.valueOf(frqcdn.getFrequencyDefinition().getSecondaryUnits()));
+      }
+    } // AutoPaymentAllowed
+    if (memberCondition != null
+        && memberCondition.get(LNCdarValues.AUTO_PAYMENT_ALLOWD.getCode()) != null) {
+      final TextCondition textCdn =
+          (TextCondition)
+              memberCondition.get(LNCdarValues.AUTO_PAYMENT_ALLOWD.getCode()).getCondition();
+      final String autoPymntAllowed = textCdn.getText();
+      input.setAutoLnPmtInd(mapTextToFlag(autoPymntAllowed));
+    }
+  }
+
+  private void getContractualAmount(
+      final Map<String, ConditionDetails> memberCondition,
+      final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    if (memberCondition != null
+        && memberCondition.get(LNCdarValues.CONTRACTUAL_AMOUNT.getCode()) != null) {
+      final CurrencySpecificCondition curncyCdn =
+          (CurrencySpecificCondition)
+              memberCondition.get(LNCdarValues.CONTRACTUAL_AMOUNT.getCode()).getCondition();
+      final AmountCondition amtCdn =
+          (AmountCondition) curncyCdn.getCurrencySpecificDetailsList().get(0).getCondition();
+      final LNArrangementHelper arrangementHelper = new LNArrangementHelper(threadContext);
+      Arrangement arrangement =
+          arrangementHelper.getArrangementInformation(
+              threadContext, input.getArrangementIdentification());
+      final LNBalanceHelper lnBalanceHelper = new LNBalanceHelper();
+      BigDecimal prinicpalBalance =
+          lnBalanceHelper
+              .getBalance(
+                  threadContext,
+                  arrangement.getArrangementIdentifier(),
+                  LNBalanceConstants.ACTIVE_OTSTNDNG_PRINCIPAL_BALANCE,
+                  arrangement.getCurrencyIdentifier(),
+                  threadContext.getStandardParameters().getBookingDate())
+              .getAmount();
+      if (prinicpalBalance.compareTo(BigDecimal.ZERO) == 0) {
+        prinicpalBalance = amtCdn.getAmount();
+      }
+      input.setContractualAmount(prinicpalBalance);
+      input.setCurrencyCode(amtCdn.getCurrencyIsoCode());
+    }
+  }
+
+  private void getLoanTerm(
+      final Map<String, ConditionDetails> memberCondition,
+      final LNAmortizationCalculatorCreate input,
+      RoundingMode roundingMode)
+      throws BusinessException, TechnicalFailureException {
+
+    final List<DurationCondition> matDuration = new ArrayList<>();
+    DurationCondition durationCondition = null;
+    if (null != memberCondition) {
+      durationCondition =
+          (DurationCondition) memberCondition.get(LNCdarValues.LOAN_TERM.getCode()).getCondition();
+    }
+    List<DurationSelectedValue> durationSelectedValueList = new ArrayList<>();
+    durationSelectedValueList =
+        updateMaturityDetails(input, durationCondition, durationSelectedValueList, roundingMode);
+    if (durationSelectedValueList != null && !durationSelectedValueList.isEmpty()) {
+      final DurationDefinition def = new DurationDefinition();
+      def.setDurationSelectedValue(durationSelectedValueList);
+      final DurationCondition condition = new DurationCondition();
+      condition.setDurationDefinition(def);
+      matDuration.add(condition);
+      final MaturityDetail matDetail = new MaturityDetail();
+      matDetail.setMaturityDate(
+          new LNDateCalculatorForDuration()
+              .calculateMaturityDate(threadContext, input.getEffectiveDate(), matDuration));
+      if ("EndOfEveryMonth".equals(input.getPmtFreqType())) {
+        final Calendar effectiveDateCal = convertToCalendar(input.getEffectiveDate());
+        if (isMonthEnd(effectiveDateCal)) {
+          final Calendar start = convertToCalendar(matDetail.getMaturityDate());
+          moveToMonthEnd(start);
+          matDetail.setMaturityDate(convertToCorebankDate(start));
+        }
+      }
+      if (input.getArrangementIdentification() != null) {
+        matDetail.setCondition(durationCondition);
+      }
+      input.setMaturityDetails(matDetail);
+    }
+  }
+
+  protected static boolean isMonthEnd(final Calendar cal) {
+    final int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+    final int lastDayOfMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH);
+    return dayOfMonth == lastDayOfMonth;
+  }
+
+  protected static Calendar convertToCalendar(final CorebankDate date) {
+    final Calendar cal = Calendar.getInstance();
+    cal.setTime(date.getSQLDate());
+    return cal;
+  }
+
+  protected static void moveToMonthEnd(final Calendar cal) {
+    cal.set(Calendar.DAY_OF_MONTH, cal.getActualMaximum(Calendar.DAY_OF_MONTH));
+  }
+
+  protected static CorebankDate convertToCorebankDate(final Calendar calendar) {
+    return new CorebankDate(calendar.getTime().getTime());
+  }
+
+  /**
+   * @param input
+   * @param durationCondition
+   * @param durationSelectedValueList
+   * @return
+   * @throws TechnicalFailureException
+   * @throws BusinessException
+   */
+  public List<DurationSelectedValue> updateMaturityDetails(
+      final LNAmortizationCalculatorCreate input,
+      final DurationCondition durationCondition,
+      List<DurationSelectedValue> durationSelectedValueList,
+      RoundingMode roundingMode)
+      throws TechnicalFailureException, BusinessException {
+
+    Long durationUnit = 0l;
+    if (input.getEquateInstltAmount() != null && input.getMaturityDetails() == null) {
+      DurationSelectedValue durSelectedValue = new DurationSelectedValue();
+      if (input.getInterestRate() == null) {
+        final LNArrangementHelper arrangementHelper = new LNArrangementHelper(threadContext);
+        Arrangement arrangement =
+            arrangementHelper.getArrangementInformation(
+                threadContext, input.getArrangementIdentification());
+        getCalcBasisAndIntRateForArrangement(threadContext, arrangement, input);
+      }
+
+      try {
+        durationUnit = new LNArAmortizationTermCalculatorHelper().getLoanTerms(input, roundingMode);
+      } catch (NumberFormatException e) {
+        new LNBaseValidator(threadContext)
+            .businessError(
+                LNMsg.SHORT_NAME,
+                LNMsg.CHARGE_INSTREST_PORTION_EXCEEDS_USER_DEFINED_PAYMENT_AMOUNT);
+      }
+
+      String pmtFreqType = input.getPmtFreqType();
+      if (Arrays.<FrequencyType>asList(
+              FrequencyType.MONTHS_BETWEEN,
+              FrequencyType.EVERY_MONTH,
+              FrequencyType.END_OF_EVERY_MONTH)
+          .contains(FrequencyType.parseEncodedValue(pmtFreqType))) {
+        durSelectedValue.setDurationUnitType(DurationUnitType.MONTHS.getCode());
+      } else if (Arrays.<FrequencyType>asList(FrequencyType.WEEKS_BETWEEN, FrequencyType.EVERY_WEEK)
+          .contains(FrequencyType.parseEncodedValue(pmtFreqType))) {
+        durSelectedValue.setDurationUnitType(DurationUnitType.WEEKS.getCode());
+      } else if (Arrays.<FrequencyType>asList(FrequencyType.YEARS_BETWEEN)
+          .contains(FrequencyType.parseEncodedValue(pmtFreqType))) {
+        durSelectedValue.setDurationUnitType(DurationUnitType.YEARS.getCode());
+      }
+      durSelectedValue.setUnit(durationUnit);
+      durationSelectedValueList.add(durSelectedValue);
+    } else if (durationCondition != null) {
+      durationSelectedValueList =
+          durationCondition.getDurationDefinition().getDurationSelectedValue();
+    }
+    return durationSelectedValueList;
+  }
+
+  public Boolean mapTextToFlag(final String flagValue) {
+    return flagValue.equalsIgnoreCase(FlagType.YES.getCode());
+  }
+
+  private void getRateDeterminnationBasis(
+      final Condition condition, final LNAmortizationCalculatorCreate input)
+      throws BusinessException, TechnicalFailureException {
+    final Map<String, ConditionDetails> memberCondition =
+        ((ConditionGroup) condition).getMemberConditions();
+    Arrangement arrangement = null;
+
+    if (input.getArrangementIdentification() != null) {
+      arrangement =
+          new LNArrangementHelper(threadContext)
+              .getArrangementInformation(threadContext, input.getArrangementIdentification());
+      input.setCurrencyCode(arrangement.getCurrencyCode());
+    }
+
+    mapInputRateDtrmBasis(input, memberCondition);
+
+    if ((!input.getOddDaysIntProcessing())
+        && memberCondition != null
+        && memberCondition.get(LNCdarValues.ODD_DAYS_INTEREST_PROCESSING.getCode()) != null) {
+
+      final FlagCondition textCdn =
+          (FlagCondition)
+              memberCondition
+                  .get(LNCdarValues.ODD_DAYS_INTEREST_PROCESSING.getCode())
+                  .getCondition();
+
+      if (input.getFirstPaymentDate() != null) {
+        input.setOddDaysIntProcessing(mapTextToFlag("No"));
+      } else if (null != textCdn) {
+        input.setOddDaysIntProcessing(mapTextToFlag(textCdn.getText()));
+      }
+
+      if (arrangement != null) {
+        final Condition oddDaysInterestProcessingCond =
+            new LNConditionCacheHelper()
+                .getCachedCondition(
+                    threadContext,
+                    new ArrangementInternalIdentification(arrangement.getArrangementIdentifier()),
+                    LNCdarValues.ODD_DAYS_INTEREST_PROCESSING.getCode(),
+                    arrangement.getEffectiveDate());
+        if (oddDaysInterestProcessingCond != null) {
+          final FlagCondition oddDaysInterestProcessingFlag =
+              (FlagCondition) oddDaysInterestProcessingCond;
+          final String oddDaysInterestProcessing = oddDaysInterestProcessingFlag.getText();
+          input.setOddDaysIntProcessing(mapTextToFlag(oddDaysInterestProcessing));
+        }
+        LNTransactionAdditionalData lnTransactionAdditionalData;
+
+        try {
+          final LNTransactionAdditionalDataHelper lnTransAddnlDataHelper =
+              new LNTransactionAdditionalDataHelper();
+          lnTransactionAdditionalData =
+              lnTransAddnlDataHelper.getTransactionAdditionalData(
+                  threadContext, arrangement.getArrangementIdentifier());
+          mapInputEffectiveDate(input, lnTransactionAdditionalData);
+
+        } catch (ConcurrentUpdateException | NotAuthorizedException e) {
+          throw new TechnicalFailureException(e);
+        }
+      }
+    }
+
+    mapInputOddDaysIntCollectionMethod(input, memberCondition, arrangement);
+  }
+
+  private void mapInputOddDaysIntCollectionMethod(
+      final LNAmortizationCalculatorCreate input,
+      final Map<String, ConditionDetails> memberCondition,
+      final Arrangement arrangement)
+      throws BusinessException, TechnicalFailureException {
+    if (input.getOddDaysIntCollectionMethod() == null
+        && memberCondition != null
+        && memberCondition.get(LNCdarValues.ODD_DAYS_INTEREST_COLLECTION.getCode()) != null) {
+      final TextCondition textCdn =
+          (TextCondition)
+              memberCondition
+                  .get(LNCdarValues.ODD_DAYS_INTEREST_COLLECTION.getCode())
+                  .getCondition();
+      input.setOddDaysIntCollectionMethod(textCdn.getText());
+
+      if (arrangement != null) {
+        final LNConditionCacheHelper lnArrangementConditionCacheHelper =
+            new LNConditionCacheHelper();
+        final Condition oddDaysInterestCollectionCond =
+            lnArrangementConditionCacheHelper.getCachedCondition(
+                threadContext,
+                new ArrangementInternalIdentification(arrangement.getArrangementIdentifier()),
+                LNCdarValues.ODD_DAYS_INTEREST_COLLECTION.getCode(),
+                arrangement.getEffectiveDate());
+
+        if (oddDaysInterestCollectionCond != null) {
+          final String oddDaysInterestCollection =
+              ((TextCondition) oddDaysInterestCollectionCond).getText();
+
+          input.setOddDaysIntCollectionMethod(oddDaysInterestCollection);
+        }
+      }
+    }
+  }
+
+  private void mapInputEffectiveDate(
+      final LNAmortizationCalculatorCreate input,
+      final LNTransactionAdditionalData lnTransactionAdditionalData)
+      throws BusinessException, TechnicalFailureException {
+
+    CorebankDate lastBillDate = null;
+    if (lnTransactionAdditionalData != null) {
+
+      lastBillDate = lnTransactionAdditionalData.getAdditionalDataDetails().getLastBillingDate();
+    }
+    if (input.isReschedule() && input.getOddDaysIntProcessing() && lastBillDate == null) {
+
+      final CorebankDate oddDaysEndDate =
+          new LNFrequencyDateCalculatorHelper()
+              .calculateNextPaymentDate(
+                  threadContext,
+                  FrequencyType.parseEncodedValue(input.getPmtFreqType()),
+                  input.getPmtFreqValue() == null ? 0 : input.getPmtFreqValue().intValue(),
+                  input.getEffectiveDate().toString(),
+                  null,
+                  0);
+      input.setEffectiveDate(oddDaysEndDate);
+    }
+  }
+
+  private void mapInputRateDtrmBasis(
+      final LNAmortizationCalculatorCreate input,
+      final Map<String, ConditionDetails> memberCondition) {
+    if (memberCondition != null
+        && memberCondition.get(LNCdarValues.INT_RATE_DETERMINATION_BASIS.getCode()) != null
+        && input.getRateDtrmBasis() == null) {
+      final TextCondition textCdn =
+          (TextCondition)
+              memberCondition
+                  .get(LNCdarValues.INT_RATE_DETERMINATION_BASIS.getCode())
+                  .getCondition();
+      input.setRateDtrmBasis(textCdn.getText());
+    }
+  }
+
+  private void getPaymentTypeAndCalOptionForArrangement(
+      final ThreadContext threadContext, final LNAmortizationCalculatorCreate input)
+      throws TechnicalFailureException, BusinessException {
+
+    final LNArBillingScheduleRelationshipContract lnArBillingScheduleRelationship =
+        ConnectorService.getImplementation(
+            threadContext, LNArBillingScheduleRelationshipContract.class);
+    final List<LNArBillingScheduleDefRltnp> lnArBillingScheduleDefRltnpList =
+        lnArBillingScheduleRelationship.getApprovedArrBillingSchdlRlntpList(
+            threadContext, input.getArrangementIdentification(), input.getEffectiveDate());
+    List<MultiplePaymentFrequencyDetails> multiplePaymentFrequencyDetailsList =
+        new ArrayList<MultiplePaymentFrequencyDetails>();
+    final LNBillingScheduleContract lnBillingScheduleContract =
+        ConnectorService.getImplementation(threadContext, LNBillingScheduleContract.class);
+    boolean isPrincipalAdded = false;
+    boolean isInterestAdded = false;
+
+    if (lnArBillingScheduleDefRltnpList != null && lnArBillingScheduleDefRltnpList.size() == 1) {
+
+      LNArBillingScheduleDefRltnp lnArBillingScheduleDefRltnp = null;
+      final ArrangementContract contract =
+          ConnectorService.getImplementation(threadContext, ArrangementContract.class);
+      Arrangement arrangement =
+          contract.getArrangementInformation(
+              threadContext, input.getArrangementIdentification(), null);
+
+      CorebankDate termoutEffectiveDate = null;
+      if (arrangement.getProductElementCode().equals(LNConstants.LINEOFCREDIT)) {
+        termoutEffectiveDate =
+            new LnLOCTermoutHelper()
+                .getTermOutEffectiveDateByArrangement(threadContext, arrangement);
+      }
+
+      if (termoutEffectiveDate != null) {
+        lnArBillingScheduleDefRltnp =
+            lnArBillingScheduleRelationship.getArrBillingSchdlRlntp(
+                threadContext, input.getArrangementIdentification(), termoutEffectiveDate);
+      } else {
+        lnArBillingScheduleDefRltnp =
+            lnArBillingScheduleRelationship.getArrBillingSchdlRlntp(
+                threadContext, input.getArrangementIdentification(), input.getEffectiveDate());
+      }
+      input.setPaymentType(lnArBillingScheduleDefRltnp.getBillingScheduleDef().getPaymentType());
+      input.setPaymentCalOption(
+          lnArBillingScheduleDefRltnp.getBillingScheduleDef().getPaymentCalculationOption());
+      input.setBillingOption(
+          lnArBillingScheduleDefRltnp.getBillingScheduleDef().getBillingOption());
+    } else {
+
+      setMultiplePaymentFrequencyDetails(
+          threadContext,
+          input,
+          lnArBillingScheduleDefRltnpList,
+          multiplePaymentFrequencyDetailsList,
+          lnBillingScheduleContract,
+          isPrincipalAdded,
+          isInterestAdded);
+    }
+  }
+
+  private void setMultiplePaymentFrequencyDetails(
+      final ThreadContext threadContext,
+      final LNAmortizationCalculatorCreate input,
+      final List<LNArBillingScheduleDefRltnp> lnArBillingScheduleDefRltnpList,
+      List<MultiplePaymentFrequencyDetails> multiplePaymentFrequencyDetailsList,
+      final LNBillingScheduleContract lnBillingScheduleContract,
+      boolean isPrincipalAdded,
+      boolean isInterestAdded)
+      throws TechnicalFailureException, BusinessException {
+    for (LNArBillingScheduleDefRltnp lnArBillingScheduleDefRltnp :
+        lnArBillingScheduleDefRltnpList) {
+      LNBillingScheduleDef bilingSchedule = null;
+      LNBillingScheduleData compList = null;
+      final JSONConverter jsonConvertor = new JSONConverter();
+      if (lnArBillingScheduleDefRltnp != null) {
+
+        bilingSchedule =
+            lnBillingScheduleContract.getBillingScheduleDefinition(
+                threadContext,
+                null,
+                lnArBillingScheduleDefRltnp.getBillingScheduleIdentifier(),
+                null,
+                ObjectCurrentStatus.APPROVED);
+        input.setPaymentType(bilingSchedule.getPaymentType());
+        compList =
+            jsonConvertor.toObject(
+                lnArBillingScheduleDefRltnp.getBillingScheduleData(), LNBillingScheduleData.class);
+      }
+      ConditionContainerContract conditionContainerContract =
+          ConnectorService.getImplementation(threadContext, ConditionContainerContract.class);
+
+      if (compList != null) {
+
+        List<LNBillingComponentDetail> componentDetailsList = compList.getBillCmptList();
+        for (LNBillingComponentDetail lnBillingComponentDetail : componentDetailsList) {
+          MultiplePaymentFrequencyDetails multiplePaymentFrequencyDetails =
+              new MultiplePaymentFrequencyDetails();
+          if (lnBillingComponentDetail
+                  .getCmptTyp()
+                  .equals(MultiplePaymentFrequencyDetails.COMPONENTTYPE_PRINCIPAL)
+              && !isPrincipalAdded) {
+            multiplePaymentFrequencyDetails.setComponentType(
+                MultiplePaymentFrequencyDetails.COMPONENTTYPE_PRINCIPAL);
+            setPaymentTypeAndValue(
+                threadContext,
+                lnArBillingScheduleDefRltnp,
+                multiplePaymentFrequencyDetails,
+                conditionContainerContract);
+            isPrincipalAdded = true;
+
+            multiplePaymentFrequencyDetails.setPaymentType(bilingSchedule.getPaymentType());
+            multiplePaymentFrequencyDetails.setPaymentCalOption(
+                bilingSchedule.getPaymentCalculationOption());
+            multiplePaymentFrequencyDetails.setBillingOption(bilingSchedule.getBillingOption());
+            multiplePaymentFrequencyDetailsList.add(multiplePaymentFrequencyDetails);
+          } else if (!isInterestAdded
+              && lnBillingComponentDetail
+                  .getCmptTyp()
+                  .equals(MultiplePaymentFrequencyDetails.COMPONENTTYPE_INTEREST)) {
+            multiplePaymentFrequencyDetails.setComponentType(
+                MultiplePaymentFrequencyDetails.COMPONENTTYPE_INTEREST);
+            setPaymentTypeAndValue(
+                threadContext,
+                lnArBillingScheduleDefRltnp,
+                multiplePaymentFrequencyDetails,
+                conditionContainerContract);
+            isInterestAdded = true;
+            multiplePaymentFrequencyDetails.setPaymentType(bilingSchedule.getPaymentType());
+            multiplePaymentFrequencyDetails.setPaymentCalOption(
+                bilingSchedule.getPaymentCalculationOption());
+            multiplePaymentFrequencyDetails.setBillingOption(bilingSchedule.getBillingOption());
+
+            multiplePaymentFrequencyDetailsList.add(multiplePaymentFrequencyDetails);
+          }
+        }
+      }
+    }
+    input.setMultiplePaymentFrequencyDetailsList(multiplePaymentFrequencyDetailsList);
+  }
+
+  private void setPaymentTypeAndValue(
+      final ThreadContext threadContext,
+      LNArBillingScheduleDefRltnp lnArBillingScheduleDefRltnp,
+      MultiplePaymentFrequencyDetails multiplePaymentFrequencyDetails,
+      ConditionContainerContract conditionContainerContract)
+      throws BusinessException, TechnicalFailureException {
+    ConditionDetails cdnDtls =
+        conditionContainerContract.getCondition(
+            threadContext,
+            lnArBillingScheduleDefRltnp.getPaymentFrequencyIdentifier(),
+            "Arrangement",
+            null,
+            null);
+    FrequencyCondition cdn = (FrequencyCondition) cdnDtls.getCondition();
+    multiplePaymentFrequencyDetails.setPmtFreqType(
+        cdn.getFrequencyDefinition().getPrimaryFrequencyType());
+    if (cdn.getFrequencyDefinition().getPrimaryUnits() != null) {
+      multiplePaymentFrequencyDetails.setPmtFreqValue(
+          BigInteger.valueOf(cdn.getFrequencyDefinition().getPrimaryUnits()));
+    }
+  }
+
+  private void getPaymentTypeAndCalOptionFromProduct(
+      final ThreadContext threadContext,
+      final long productIdentifier,
+      final LNAmortizationCalculatorCreate input)
+      throws TechnicalFailureException {
+    final LNProdBillSchdlDfnRltnpContract lnProdBillSchDefReltnpContract =
+        ConnectorService.getImplementation(threadContext, LNProdBillSchdlDfnRltnpContract.class);
+    final LNProdBillScheduleDefRltnp lnProdBillScheduleDefRltnp =
+        lnProdBillSchDefReltnpContract.getProdBillSchdlDfnRltnp(
+            threadContext,
+            productIdentifier,
+            true,
+            input.getEffectiveDate() != null
+                ? input.getEffectiveDate()
+                : threadContext.getStandardParameters().getBookingDate());
+    if (lnProdBillScheduleDefRltnp != null
+        && lnProdBillScheduleDefRltnp.getBillingScheduleDef() != null) {
+      input.setPaymentType(lnProdBillScheduleDefRltnp.getBillingScheduleDef().getPaymentType());
+      input.setBillingOption(lnProdBillScheduleDefRltnp.getBillingScheduleDef().getBillingOption());
+      input.setPaymentCalOption(
+          lnProdBillScheduleDefRltnp.getBillingScheduleDef().getPaymentCalculationOption());
+    }
+  }
+}
